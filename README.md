@@ -14,8 +14,7 @@ yet — that begins in the Crypto Core phase.
 
 ## Requirements
 
-- Python 3.11+ (project targets 3.13; developed against 3.11 due to local
-  availability — recommend upgrading to 3.13 before final submission)
+- Python 3.11+
 - Windows (uses `pywin32` for device/OS integration in later phases)
 
 ## Setup
