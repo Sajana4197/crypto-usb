@@ -40,18 +40,30 @@ class ExpiryRules:
 
 @dataclass
 class DeviceBinding:
-    """Which USB device this file is bound to.
+    """Which USB device (and, optionally, host machine) this file is bound to.
 
-    Actual device fingerprinting/validation is implemented by the
-    future `usb/` module; this only carries the data.
+    `device_id`/`label` are the human-readable identifiers recorded by the
+    `usb/` module. `usb_serial` and `machine_fingerprint` are the actual
+    unforgeable(-ish) identity signals checked by
+    `validation.device_binding_validator` — a drive letter can coincide
+    across two different physical devices, but a volume serial number and
+    a machine's installation GUID are far harder to collide by accident.
     """
 
     device_id: Optional[str] = None
     label: Optional[str] = None
     bound: bool = False
+    usb_serial: Optional[str] = None
+    machine_fingerprint: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {"device_id": self.device_id, "label": self.label, "bound": self.bound}
+        return {
+            "device_id": self.device_id,
+            "label": self.label,
+            "bound": self.bound,
+            "usb_serial": self.usb_serial,
+            "machine_fingerprint": self.machine_fingerprint,
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "DeviceBinding":
@@ -59,6 +71,8 @@ class DeviceBinding:
             device_id=data.get("device_id"),
             label=data.get("label"),
             bound=data.get("bound", False),
+            usb_serial=data.get("usb_serial"),
+            machine_fingerprint=data.get("machine_fingerprint"),
         )
 
 

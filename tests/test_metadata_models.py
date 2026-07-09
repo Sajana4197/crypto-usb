@@ -71,6 +71,30 @@ def test_expiry_rules_round_trip_with_none_values():
     assert ExpiryRules.from_dict(rules.to_dict()) == rules
 
 
+def test_device_binding_round_trip_with_usb_serial_and_machine_fingerprint():
+    binding = DeviceBinding(
+        device_id="E:\\",
+        label="My USB",
+        bound=True,
+        usb_serial="ABCD1234:FAT32:1000000",
+        machine_fingerprint="a" * 64,
+    )
+    assert DeviceBinding.from_dict(binding.to_dict()) == binding
+
+
+def test_device_binding_defaults_usb_serial_and_machine_fingerprint_to_none():
+    binding = DeviceBinding()
+    assert binding.usb_serial is None
+    assert binding.machine_fingerprint is None
+
+
+def test_device_binding_from_dict_without_new_fields_defaults_to_none():
+    legacy_data = {"device_id": "E:\\", "label": "My USB", "bound": True}
+    binding = DeviceBinding.from_dict(legacy_data)
+    assert binding.usb_serial is None
+    assert binding.machine_fingerprint is None
+
+
 def test_round_trip_via_json():
     import json
 

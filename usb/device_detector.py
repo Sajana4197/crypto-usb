@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 import psutil
 
@@ -24,6 +24,21 @@ logger = get_logger(__name__)
 # win32file.DRIVE_REMOVABLE, duplicated here so this module has no hard
 # dependency on pywin32 being importable on non-Windows platforms.
 _DRIVE_REMOVABLE = 2
+
+
+class _DiskUsage(Protocol):
+    """Structural type for what we read off `psutil.disk_usage`'s result.
+
+    Declared as read-only properties (not plain attributes) so it
+    structurally matches psutil's `sdiskusage` namedtuple, whose fields
+    are read-only.
+    """
+
+    @property
+    def total(self) -> int: ...
+
+    @property
+    def free(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -85,7 +100,7 @@ class USBDeviceDetector:
     def __init__(
         self,
         partitions_fn: Callable[[], list] = lambda: psutil.disk_partitions(all=False),
-        usage_fn: Callable[[str], object] = psutil.disk_usage,
+        usage_fn: Callable[[str], _DiskUsage] = psutil.disk_usage,
         drive_type_fn: Callable[[str], Optional[int]] = _default_drive_type,
         volume_label_fn: Callable[[str], str] = _default_volume_label,
     ) -> None:
