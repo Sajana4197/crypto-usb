@@ -11,3 +11,6 @@ CONFIG_FILE_NAME = "config.json"
 DATABASE_FILE_NAME = "crypto_usb.db"
 
 SCHEMA_VERSION = 1
+
+# Sender module: files above this size are rejected during queue validation.
+MAX_QUEUE_FILE_SIZE_BYTES = 4 * 1024 ** 3  # 4 GiB
