@@ -10,7 +10,8 @@ from ui.pages.base_page import BasePage
 _MODULES = (
     ("Hybrid Encryption (AES + RSA/ECC)", "Not yet implemented"),
     ("Metadata-Driven Access Control", "Not yet implemented"),
-    ("Device Validation", "Not yet implemented"),
+    ("Device Validation", "Implemented"),
+    ("Secure Storage Layer", "Implemented"),
     ("One-Time Access Enforcement", "Not yet implemented"),
     ("Key Invalidation", "Not yet implemented"),
     ("RAM-Only Decryption", "Not yet implemented"),
