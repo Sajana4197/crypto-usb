@@ -12,6 +12,7 @@ _MODULES = (
     ("Metadata-Driven Access Control", "Not yet implemented"),
     ("Device Validation", "Implemented"),
     ("Secure Storage Layer", "Implemented"),
+    ("User Authentication", "Implemented"),
     ("One-Time Access Enforcement", "Not yet implemented"),
     ("Key Invalidation", "Not yet implemented"),
     ("RAM-Only Decryption", "Not yet implemented"),

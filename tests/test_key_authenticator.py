@@ -1,0 +1,64 @@
+"""Tests for RSA-PSS challenge/response private-key authentication."""
+
+import pytest
+
+from crypto import rsa_keypair
+from security.key_authenticator import KeyAuthenticator, generate_challenge
+
+PASSPHRASE = b"a-strong-passphrase"
+
+
+@pytest.fixture
+def encrypted_private_pem(rsa_keypair_fixture):
+    return rsa_keypair.serialize_private_key(rsa_keypair_fixture.private_key, PASSPHRASE)
+
+
+@pytest.fixture
+def public_pem(rsa_keypair_fixture):
+    return rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
+
+
+def test_authenticate_succeeds_with_matching_key(encrypted_private_pem, public_pem):
+    challenge = generate_challenge()
+    assert KeyAuthenticator().authenticate(encrypted_private_pem, PASSPHRASE, public_pem, challenge) is True
+
+
+def test_authenticate_fails_with_wrong_passphrase(encrypted_private_pem, public_pem):
+    challenge = generate_challenge()
+    assert (
+        KeyAuthenticator().authenticate(encrypted_private_pem, b"wrong-passphrase", public_pem, challenge)
+        is False
+    )
+
+
+def test_authenticate_fails_with_non_enrolled_public_key(
+    encrypted_private_pem, other_rsa_keypair_fixture
+):
+    other_public_pem = rsa_keypair.serialize_public_key(other_rsa_keypair_fixture.public_key)
+    challenge = generate_challenge()
+
+    assert (
+        KeyAuthenticator().authenticate(encrypted_private_pem, PASSPHRASE, other_public_pem, challenge)
+        is False
+    )
+
+
+def test_authenticate_fails_with_wrong_private_key(public_pem, other_rsa_keypair_fixture):
+    # Correct passphrase, but a private key that does not pair with the enrolled public key.
+    wrong_private_pem = rsa_keypair.serialize_private_key(other_rsa_keypair_fixture.private_key, PASSPHRASE)
+    challenge = generate_challenge()
+
+    assert KeyAuthenticator().authenticate(wrong_private_pem, PASSPHRASE, public_pem, challenge) is False
+
+
+def test_authenticate_fails_with_malformed_private_key_pem(public_pem):
+    challenge = generate_challenge()
+    assert KeyAuthenticator().authenticate(b"not a valid pem", PASSPHRASE, public_pem, challenge) is False
+
+
+def test_generate_challenge_is_random_and_correct_size():
+    a = generate_challenge()
+    b = generate_challenge()
+
+    assert a != b
+    assert len(a) == 32

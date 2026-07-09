@@ -1,0 +1,55 @@
+"""Secure password hashing.
+
+Uses scrypt — a memory-hard KDF — rather than a fast general-purpose
+hash, so brute-forcing a stolen password digest is expensive even with
+GPU/ASIC hardware. Each password gets a fresh random salt, and
+verification compares digests in constant time to avoid leaking match
+information through timing.
+"""
+
+from __future__ import annotations
+
+import hmac
+import os
+
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+from security.exceptions import WeakPasswordError
+from security.models import PasswordCredential
+
+# scrypt cost parameters: N (CPU/memory cost, must be a power of 2), r
+# (block size), p (parallelism). These values follow the widely used
+# "interactive login" recommendation (~roughly tens of milliseconds per
+# hash on typical hardware) while remaining memory-hard.
+SCRYPT_N = 2**14
+SCRYPT_R = 8
+SCRYPT_P = 1
+KEY_LEN_BYTES = 32
+SALT_LEN_BYTES = 16
+
+MIN_PASSWORD_LENGTH = 8
+
+
+def validate_password_strength(password: str) -> None:
+    """Raise `WeakPasswordError` if `password` fails the minimum policy."""
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise WeakPasswordError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters long")
+
+
+def hash_password(password: str) -> PasswordCredential:
+    """Hash `password` under a fresh random salt. Raises `WeakPasswordError` first."""
+    validate_password_strength(password)
+    salt = os.urandom(SALT_LEN_BYTES)
+    digest = _derive(password, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, KEY_LEN_BYTES)
+    return PasswordCredential(salt=salt, digest=digest, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, key_len=KEY_LEN_BYTES)
+
+
+def verify_password(password: str, credential: PasswordCredential) -> bool:
+    """Constant-time check that `password` matches `credential`."""
+    candidate = _derive(password, credential.salt, credential.n, credential.r, credential.p, credential.key_len)
+    return hmac.compare_digest(candidate, credential.digest)
+
+
+def _derive(password: str, salt: bytes, n: int, r: int, p: int, key_len: int) -> bytes:
+    kdf = Scrypt(salt=salt, length=key_len, n=n, r=r, p=p)
+    return kdf.derive(password.encode("utf-8"))
