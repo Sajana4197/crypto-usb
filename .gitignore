@@ -9,3 +9,5 @@ logs/
 
 .vscode/
 .idea/
+
+graphify-out/
