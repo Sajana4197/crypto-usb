@@ -8,17 +8,20 @@ from PySide6.QtWidgets import QLabel, QListWidget, QListWidgetItem
 from ui.pages.base_page import BasePage
 
 _MODULES = (
-    ("Hybrid Encryption (AES + RSA/ECC)", "Not yet implemented"),
-    ("Metadata-Driven Access Control", "Not yet implemented"),
+    ("Hybrid Encryption (AES + RSA)", "Implemented"),
+    ("Metadata-Driven Access Control", "Implemented"),
     ("Device Validation", "Implemented"),
     ("Secure Storage Layer", "Implemented"),
     ("User Authentication", "Implemented"),
     ("Validation Engine", "Implemented"),
     ("One-Time Access Enforcement", "Implemented"),
-    ("Key Invalidation", "Not yet implemented"),
-    ("RAM-Only Decryption", "Not yet implemented"),
-    ("Deception Module", "Not yet implemented"),
-    ("Usage Tracking", "Not yet implemented"),
+    ("Key Invalidation (Crypto-Shredding)", "Implemented"),
+    ("RAM-Only Decryption", "Implemented"),
+    ("Secure Controlled Viewer", "Implemented"),
+    ("Deception Module", "Implemented"),
+    ("Usage Tracking", "Implemented"),
+    ("Secure Cleanup", "Implemented"),
+    ("Full Workflow Integration", "Implemented"),
 )
 
 

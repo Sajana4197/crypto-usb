@@ -1,14 +1,32 @@
-"""Main application window: wires the navigation sidebar to a page stack."""
+"""Main application window: wires the navigation sidebar to a page stack.
+
+Also the composition root that hands every page the shared, persisted
+dependencies the integrated workflow needs to connect the write side
+(`DevicePage`) to the read side (`DecryptionPage`) — the same
+`MetadataRepository`/`MetadataProtectionKeys` (so a file written by one
+page can actually be validated and read back by the other) and the
+same `UsageTracker` (so both sides append to one tamper-evident log).
+See `app.protection_keys` for where the persisted keys come from.
+"""
 
 from __future__ import annotations
+
+from typing import Optional
 
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QWidget
 
 from app.config import ConfigManager
+from app.protection_keys import load_or_create_metadata_protection_keys, load_or_create_tracking_protection_keys
 from core.constants import APP_NAME, APP_VERSION
 from core.logger import get_logger
 from crypto.secure_cleanup import CleanupReason, cleanup
+from database.db_manager import DatabaseManager
+from metadata.protection import MetadataProtectionKeys
+from metadata.repository import MetadataRepository
+from security.auth_session import SessionManager
+from tracking.repository import TrackingRepository
+from tracking.tracking_service import UsageTracker
 from ui.navigation.navigation_panel import DEFAULT_NAV_ITEMS, NavigationPanel
 from ui.pages.dashboard_page import DashboardPage
 from ui.pages.deception_page import DeceptionPage
@@ -29,11 +47,15 @@ class MainWindow(QMainWindow):
         self,
         config_manager: ConfigManager,
         theme_manager: ThemeManager,
+        db_manager: Optional[DatabaseManager] = None,
+        session_manager: Optional[SessionManager] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._config_manager = config_manager
         self._theme_manager = theme_manager
+        self.db_manager = db_manager
+        self.session_manager = session_manager
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.resize(config_manager.config.window_width, config_manager.config.window_height)
@@ -53,11 +75,22 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(current_theme=theme_manager.current_theme)
         self.settings_page.theme_changed.connect(self._on_theme_changed)
 
+        metadata_repository, protection_keys, usage_tracker = self._build_shared_services()
+
         self._pages = {
             "dashboard": DashboardPage(),
             "encryption": EncryptionPage(),
-            "decryption": DecryptionPage(),
-            "devices": DevicePage(),
+            "decryption": DecryptionPage(
+                metadata_repository=metadata_repository,
+                protection_keys=protection_keys,
+                session_manager=self.session_manager,
+                usage_tracker=usage_tracker,
+            ),
+            "devices": DevicePage(
+                metadata_repository=metadata_repository,
+                protection_keys=protection_keys,
+                session_manager=self.session_manager,
+            ),
             "metadata": MetadataPage(),
             "security": SecurityPage(),
             "deception": DeceptionPage(),
@@ -79,6 +112,27 @@ class MainWindow(QMainWindow):
             last_page = "dashboard"
         self.navigation.set_active(last_page)
         self._navigate_to(last_page)
+
+    def _build_shared_services(
+        self,
+    ) -> tuple[Optional[MetadataRepository], Optional[MetadataProtectionKeys], Optional[UsageTracker]]:
+        """Build the `MetadataRepository`, `MetadataProtectionKeys`, and
+        `UsageTracker` every page that touches a protected file must
+        share, backed by `self.db_manager`. Returns `(None, None, None)`
+        when no `db_manager` was supplied (e.g. a test constructing a
+        bare `MainWindow`) — `DevicePage`/`DecryptionPage` both tolerate
+        that by falling back to their own standalone, non-persisted
+        defaults.
+        """
+        if self.db_manager is None:
+            return None, None, None
+
+        metadata_repository = MetadataRepository(self.db_manager.connect())
+        protection_keys = load_or_create_metadata_protection_keys(self.db_manager)
+        tracking_repository = TrackingRepository(self.db_manager.connect())
+        tracking_keys = load_or_create_tracking_protection_keys(self.db_manager)
+        usage_tracker = UsageTracker(tracking_keys, tracking_repository)
+        return metadata_repository, protection_keys, usage_tracker
 
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()

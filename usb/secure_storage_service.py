@@ -6,6 +6,18 @@ operation the Secure Storage Layer exists to perform: take a plaintext
 file and a validated USB device, and end up with one `.cusc` container
 on the device holding the encrypted file, its wrapped key, and its
 encrypted metadata — and nothing in plaintext, ever touching the disk.
+
+Metadata is always embedded in the `.cusc` container itself (so the
+container is self-contained and independently deep-verifiable — see
+`verify_stored_file`), and, when a `metadata_repository` is supplied,
+also saved there under the same `file_id`. That second copy is what
+`validation.validation_engine`/`usb.secure_access_service` consult for
+every access-time check (device binding, expiry, one-time access) —
+those checks need a local, queryable record independent of whatever
+`.cusc` file happens to be presented, which is exactly what
+`metadata_repository` provides. Both copies are protected with the
+same `protection_keys` and built from the same `FileMetadata`, so they
+never disagree.
 """
 
 from __future__ import annotations
@@ -21,11 +33,14 @@ from crypto.file_encryptor import FileEncryptor
 from crypto.key_manager import KeyManager
 from crypto.key_wrapper import KeyWrapper
 from metadata.hashing import compute_integrity_hash
-from metadata.models import CURRENT_METADATA_VERSION, FileMetadata
+from metadata.models import CURRENT_METADATA_VERSION, DeviceBinding, ExpiryRules, FileMetadata, UsagePolicy
 from metadata.protection import MetadataProtectionKeys, MetadataProtector, generate_protection_keys
+from metadata.repository import MetadataRepository
 from usb.device_detector import USBDevice
 from usb.secure_container import SecureContainer, verify_container_deep
 from usb.storage_writer import SecureStorageWriter
+from validation.machine_fingerprint import compute_machine_fingerprint
+from validation.usb_identifier import compute_usb_identifier
 
 logger = get_logger(__name__)
 
@@ -61,18 +76,43 @@ class SecureStorageService:
         owner_id: str,
         overwrite: bool = False,
         protection_keys: Optional[MetadataProtectionKeys] = None,
+        metadata_repository: Optional[MetadataRepository] = None,
+        expiry_rules: Optional[ExpiryRules] = None,
+        usage_policy: Optional[UsagePolicy] = None,
+        bind_to_device: bool = False,
     ) -> SecureWriteResult:
         """Encrypt `source_path` and write it to `device` as a secure container.
 
         Never writes plaintext anywhere. Raises `usb.exceptions.DeviceValidationError`,
         `ContainerOverwriteError`, `ContainerWriteError`, or `ContainerVerificationError`
         on failure (see `SecureStorageWriter.write_container`).
+
+        When `metadata_repository` is given, the same protected metadata
+        record embedded in the `.cusc` container is also saved there —
+        see the module docstring for why both copies exist. `expiry_rules`
+        / `usage_policy` (e.g. one-time access) are enforced later by
+        `validation.validation_engine`, which only ever consults the
+        repository copy. When `bind_to_device` is True, this file can
+        only ever be validated again from this same physical USB device
+        and host machine (`validation.device_binding_validator`).
         """
         source_path = Path(source_path)
         file_container = self._file_encryptor.encrypt_bytes(source_path.read_bytes(), key_wrapper)
 
         integrity_hash = compute_integrity_hash(file_container.serialize())
         file_id = str(uuid.uuid4())
+
+        device_binding = (
+            DeviceBinding(
+                device_id=device.device_id,
+                label=device.label,
+                bound=True,
+                usb_serial=compute_usb_identifier(device),
+                machine_fingerprint=compute_machine_fingerprint(),
+            )
+            if bind_to_device
+            else DeviceBinding()
+        )
 
         metadata = FileMetadata(
             file_id=file_id,
@@ -81,11 +121,17 @@ class SecureStorageService:
             wrap_algorithm=file_container.wrap_algorithm,
             integrity_hash=integrity_hash,
             created_at=datetime.now(timezone.utc),
+            expiry_rules=expiry_rules or ExpiryRules(),
+            device_binding=device_binding,
+            usage_policy=usage_policy or UsagePolicy(),
             metadata_version=CURRENT_METADATA_VERSION,
         )
 
         keys = protection_keys or generate_protection_keys()
         protected_metadata = MetadataProtector(keys).protect(metadata)
+
+        if metadata_repository is not None:
+            metadata_repository.save(protected_metadata)
 
         container = SecureContainer(
             file_id=file_id, file_container=file_container, protected_metadata=protected_metadata
@@ -108,6 +154,16 @@ class SecureStorageService:
             container_size_bytes=destination.stat().st_size,
             protection_keys=keys,
         )
+
+    def read_encrypted_file_bytes(self, container_path: Path) -> tuple[str, bytes]:
+        """Read a `.cusc` container and return `(file_id, encrypted_file_bytes)`
+        in exactly the form `usb.secure_access_service.SecureAccessService.attempt_access`
+        expects — the embedded `crypto.file_encryptor.EncryptedContainer` bytes,
+        not the outer `.cusc` envelope (whose own integrity is checked
+        separately, structurally, by `SecureContainer.deserialize` itself).
+        """
+        container = self._storage_writer.read_container(Path(container_path))
+        return container.file_id, container.file_container.serialize()
 
     def verify_stored_file(
         self,

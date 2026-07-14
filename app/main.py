@@ -64,9 +64,7 @@ def bootstrap() -> tuple[QApplication, Optional[MainWindow]]:
     theme_manager = ThemeManager(app, theme=config_manager.config.theme)
     theme_manager.apply()
 
-    window = MainWindow(config_manager, theme_manager)
-    window.db_manager = db_manager  # kept alive with the window for later phases
-    window.session_manager = session_manager  # for later access-control/validation phases
+    window = MainWindow(config_manager, theme_manager, db_manager=db_manager, session_manager=session_manager)
 
     return app, window
 

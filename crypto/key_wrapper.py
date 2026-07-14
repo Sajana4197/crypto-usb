@@ -43,6 +43,14 @@ class RSAOAEPKeyWrapper(KeyWrapper):
         self._public_key = public_key
         self._private_key = private_key
 
+    @property
+    def private_key(self) -> RSAPrivateKey | None:
+        """The private key this wrapper unwraps with, if any — exposed so a
+        caller that generated this wrapper's keypair (e.g.
+        `ui.pages.device_page.DevicePage`) can later export it for the
+        user to keep, without reaching into a private attribute."""
+        return self._private_key
+
     @staticmethod
     def _oaep_padding() -> padding.OAEP:
         return padding.OAEP(

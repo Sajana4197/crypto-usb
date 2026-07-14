@@ -29,6 +29,17 @@ one-time-access file only ever updates the metadata record, never the
 stored container; treating metadata as authoritative here is what
 makes that sufficient to permanently invalidate the file without
 rewriting or deleting anything on the USB device.
+
+When a `usage_tracker` is supplied, every attempt — granted or denied
+— is recorded as one `tracking.tracking_service.UsageTracker` session:
+login identity, whether validation passed, when the file was actually
+opened (granted attempts only), and when the session closed. This is
+the integration point `tracking.tracking_service`'s own docstring
+anticipates ("not yet wired into ... validation.validation_engine ...
+— a later integration phase"); it is wired here, at the same
+composition root that already runs validation, rather than inside
+`ValidationEngine` itself, since only this class has one attempt's
+full lifecycle in view from start to finish.
 """
 
 from __future__ import annotations
@@ -49,6 +60,7 @@ from metadata.models import FileMetadata
 from metadata.one_time_access import OneTimeAccessEnforcer
 from metadata.protection import MetadataProtectionKeys, MetadataProtector
 from metadata.repository import MetadataRepository
+from tracking.tracking_service import UsageTracker
 from usb.device_detector import USBDevice
 from validation.validation_engine import ValidationEngine, ValidationReport
 
@@ -117,11 +129,13 @@ class SecureAccessService:
         decryptor: Optional[SecureDecryptor] = None,
         deception_engine: Optional[DeceptionEngine] = None,
         enforcer: Optional[OneTimeAccessEnforcer] = None,
+        usage_tracker: Optional[UsageTracker] = None,
     ) -> None:
         self._repository = repository
         self._decryptor = decryptor or SecureDecryptor()
         self._deception_engine = deception_engine or DeceptionEngine()
         self._enforcer = enforcer or OneTimeAccessEnforcer(repository)
+        self._usage_tracker = usage_tracker
 
     def attempt_access(
         self,
@@ -133,6 +147,7 @@ class SecureAccessService:
         current_device: Optional[USBDevice] = None,
         current_usb_identifier: Optional[str] = None,
         current_machine_fingerprint: Optional[str] = None,
+        user: Optional[str] = None,
     ) -> AccessOutcome:
         """Validate and, if granted, decrypt `encrypted_file_bytes` for
         `file_id`, calling `on_granted(buffer, metadata)` with the
@@ -147,7 +162,23 @@ class SecureAccessService:
         Never raises for an expected access failure — every such case
         instead activates the Deception Engine and is reported back
         through `AccessOutcome.deception`.
+
+        `user` identifies the already-authenticated caller for the
+        usage-tracking record (see the module docstring); callers reach
+        this method only after `security.auth_controller` has already
+        authenticated them, so the recorded `authentication_result` is
+        always True — a failed authentication never gets this far.
         """
+        record = None
+        if self._usage_tracker is not None:
+            record = self._usage_tracker.start_session(
+                user=user or "unknown",
+                machine_id=current_machine_fingerprint or "unknown",
+                file_id=file_id,
+                usb_id=current_usb_identifier,
+            )
+            self._usage_tracker.record_authentication_result(record, True)
+
         engine = ValidationEngine(self._repository, MetadataProtector(protection_keys))
         report = engine.validate(
             file_id, encrypted_file_bytes, current_device, current_usb_identifier, current_machine_fingerprint
@@ -159,8 +190,14 @@ class SecureAccessService:
             logger.warning(
                 "Access denied for file_id=%s (trigger=%s); deception activated", file_id, trigger.value
             )
+            if record is not None:
+                self._usage_tracker.record_validation_result(record, False)
+                self._usage_tracker.record_close(record)
             cleanup(CleanupReason.VALIDATION_FAILURE)
             return AccessOutcome(granted=False, file_id=file_id, deception=deception)
+
+        if record is not None:
+            self._usage_tracker.record_validation_result(record, True)
 
         metadata = report.metadata
         assert metadata is not None
@@ -177,6 +214,8 @@ class SecureAccessService:
         container.wrapped_key = metadata.wrapped_key
 
         try:
+            if record is not None:
+                self._usage_tracker.record_open(record)
             with self._decryptor.open_decrypted(container, key_wrapper) as buffer:
                 on_granted(buffer, metadata)
         except (KeyUnwrappingError, DecryptionError):
@@ -186,12 +225,17 @@ class SecureAccessService:
                 "(one-time access already consumed, or invalid key material); deception activated",
                 file_id,
             )
+            if record is not None:
+                self._usage_tracker.record_close(record)
             cleanup(CleanupReason.VALIDATION_FAILURE)
             return AccessOutcome(granted=False, file_id=file_id, deception=deception)
 
         new_keys = protection_keys
         if metadata.usage_policy.one_time_access:
             new_keys = self._enforcer.burn(metadata, key_wrapper, protection_keys)
+
+        if record is not None:
+            self._usage_tracker.record_close(record)
 
         logger.info("Access granted and viewing completed for file_id=%s", file_id)
         cleanup(CleanupReason.SUCCESSFUL_VIEW)

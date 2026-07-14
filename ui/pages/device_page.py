@@ -6,11 +6,29 @@ write a plaintext file to it as an encrypted `.cusc` secure container —
 protected by hybrid AES + RSA encryption and encrypted, HMAC'd metadata —
 with overwrite protection and automatic post-write integrity verification.
 No plaintext is ever written to the device.
+
+When `metadata_repository`/`protection_keys` are supplied (see
+`ui.main_window.MainWindow._build_shared_services`), each write's
+metadata is also persisted there and bound to the presenting device —
+the same repository `ui.pages.decryption_page.DecryptionPage` reads
+from, which is what lets a file written here actually be validated and
+opened there later. Without them (e.g. the standalone page constructed
+in tests) writes still succeed exactly as before, just without a
+locally queryable record.
+
+The RSA keypair used to wrap each file's key is generated once per
+page instance and, like `ui.dialogs.auth_dialog.AuthDialog`'s
+authentication keypair, is never persisted by the application itself —
+"Export Key Pair for Decryption..." lets the user save its encrypted
+private key to a file of their choosing. Without doing this before
+closing the app, a file written here can never be decrypted again by
+anyone, including its owner — the private key would exist nowhere.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
@@ -20,7 +38,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -29,9 +49,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.constants import LOCAL_OWNER_ID
 from core.logger import get_logger
 from crypto import rsa_keypair
 from crypto.key_wrapper import RSAOAEPKeyWrapper
+from metadata.protection import MetadataProtectionKeys
+from metadata.repository import MetadataRepository
+from security.auth_session import SessionManager
+from security.password_hasher import MIN_PASSWORD_LENGTH
 from ui.pages.base_page import BasePage
 from usb.device_detector import USBDevice, USBDeviceDetector
 from usb.device_validator import USBDeviceValidator
@@ -45,11 +70,15 @@ _FAIL_COLOR = QColor("#e5484d")
 
 _COLUMN_TITLES = ("Mount", "Label", "Filesystem", "Free Space", "Total Size", "Removable")
 
-_OWNER_ID = "local-user"  # placeholder identity until the authentication phase exists
-
 
 class DevicePage(BasePage):
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        metadata_repository: Optional[MetadataRepository] = None,
+        protection_keys: Optional[MetadataProtectionKeys] = None,
+        session_manager: Optional[SessionManager] = None,
+        parent=None,
+    ) -> None:
         super().__init__(
             "Device Validation",
             "Detects removable USB devices, validates them, and stores files as "
@@ -60,6 +89,9 @@ class DevicePage(BasePage):
         self._detector = USBDeviceDetector()
         self._validator = USBDeviceValidator()
         self._service = SecureStorageService()
+        self._metadata_repository = metadata_repository
+        self._protection_keys = protection_keys
+        self._session_manager = session_manager
 
         self._devices: list[USBDevice] = []
         self._selected_device: USBDevice | None = None
@@ -74,6 +106,11 @@ class DevicePage(BasePage):
         self.add_widget(self._build_status_label())
 
         self._refresh_devices()
+
+    def _owner_id(self) -> str:
+        if self._session_manager is not None and self._session_manager.current is not None:
+            return self._session_manager.current.owner_id
+        return LOCAL_OWNER_ID
 
     # -- UI construction -------------------------------------------------
 
@@ -156,6 +193,16 @@ class DevicePage(BasePage):
         self.write_button.setEnabled(False)
         self.write_button.clicked.connect(self._on_write_clicked)
         layout.addWidget(self.write_button)
+
+        self.export_key_button = QPushButton("Export Key Pair for Decryption...")
+        self.export_key_button.setToolTip(
+            "Save this session's file-wrapping private key, encrypted with a "
+            "passphrase you choose. The application never keeps a copy — "
+            "without exporting it, files written this session can never be "
+            "decrypted again by anyone."
+        )
+        self.export_key_button.clicked.connect(self._on_export_key_clicked)
+        layout.addWidget(self.export_key_button)
 
         return panel
 
@@ -261,6 +308,36 @@ class DevicePage(BasePage):
             self._key_wrapper = RSAOAEPKeyWrapper(keypair.public_key, keypair.private_key)
         return self._key_wrapper
 
+    def _on_export_key_clicked(self) -> None:
+        key_wrapper = self._get_key_wrapper()
+        if key_wrapper.private_key is None:
+            self._show_status("No private key available to export.", ok=False)
+            return
+
+        passphrase, ok = QInputDialog.getText(
+            self,
+            "Export Private Key",
+            f"Passphrase to encrypt the exported key (minimum {MIN_PASSWORD_LENGTH} characters):",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok or len(passphrase) < MIN_PASSWORD_LENGTH:
+            if ok:
+                self._show_status(
+                    f"Export cancelled: passphrase must be at least {MIN_PASSWORD_LENGTH} characters.", ok=False
+                )
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Encrypted Private Key", "file_wrapping_key.pem", "PEM Files (*.pem)"
+        )
+        if not path:
+            return
+
+        private_pem = rsa_keypair.serialize_private_key(key_wrapper.private_key, passphrase.encode("utf-8"))
+        Path(path).write_bytes(private_pem)
+        self._show_status(f"Exported encrypted private key to {path}. Keep it and its passphrase safe.")
+        logger.info("Exported session file-wrapping private key to %s", path)
+
     def _on_write_clicked(self) -> None:
         if self._selected_device is None or self._source_path is None:
             return
@@ -275,8 +352,11 @@ class DevicePage(BasePage):
                 source_path=self._source_path,
                 device=self._selected_device,
                 key_wrapper=key_wrapper,
-                owner_id=_OWNER_ID,
+                owner_id=self._owner_id(),
                 overwrite=overwrite,
+                protection_keys=self._protection_keys,
+                metadata_repository=self._metadata_repository,
+                bind_to_device=True,
             )
         except ContainerOverwriteError:
             if self._confirm_overwrite():

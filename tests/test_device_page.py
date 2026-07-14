@@ -1,6 +1,8 @@
 """Tests for the Device Validation / Secure Storage UI page."""
 
-from PySide6.QtWidgets import QApplication
+from unittest.mock import patch
+
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
 
 from ui.pages.device_page import DevicePage
 from usb.device_detector import USBDevice
@@ -180,3 +182,48 @@ def test_write_container_overwrite_confirmed_retries_write(tmp_path, monkeypatch
 
     assert calls["count"] == 2
     assert "verified" in page.status_label.text().lower()
+
+
+# -- Exporting the file-wrapping private key --------------------------------
+
+
+def test_export_key_writes_encrypted_private_key_file(tmp_path):
+    page = _make_page()
+    destination = tmp_path / "exported.pem"
+
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), \
+         patch.object(QFileDialog, "getSaveFileName", return_value=(str(destination), "")):
+        page._on_export_key_clicked()
+
+    assert destination.exists()
+    assert b"ENCRYPTED" in destination.read_bytes() or b"PRIVATE KEY" in destination.read_bytes()
+    assert "exported" in page.status_label.text().lower()
+
+
+def test_export_key_cancelled_passphrase_dialog_does_nothing(tmp_path):
+    page = _make_page()
+
+    with patch.object(QInputDialog, "getText", return_value=("", False)), \
+         patch.object(QFileDialog, "getSaveFileName") as mock_save:
+        page._on_export_key_clicked()
+
+    mock_save.assert_not_called()
+
+
+def test_export_key_rejects_short_passphrase(tmp_path):
+    page = _make_page()
+
+    with patch.object(QInputDialog, "getText", return_value=("short", True)):
+        page._on_export_key_clicked()
+
+    assert "passphrase" in page.status_label.text().lower()
+
+
+def test_export_key_cancelled_save_dialog_does_not_write(tmp_path):
+    page = _make_page()
+
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), \
+         patch.object(QFileDialog, "getSaveFileName", return_value=("", "")):
+        page._on_export_key_clicked()
+
+    assert list(tmp_path.glob("*.pem")) == []
