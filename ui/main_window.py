@@ -58,6 +58,7 @@ class MainWindow(QMainWindow):
         self.session_manager = session_manager
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
+        self.setMinimumSize(960, 600)
         self.resize(config_manager.config.window_width, config_manager.config.window_height)
 
         central = QWidget()

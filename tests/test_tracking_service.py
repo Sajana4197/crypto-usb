@@ -1,7 +1,7 @@
 """Tests for `UsageTracker`: session lifecycle tracking and persistence."""
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 

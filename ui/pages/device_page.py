@@ -52,12 +52,14 @@ from PySide6.QtWidgets import (
 from core.constants import LOCAL_OWNER_ID
 from core.logger import get_logger
 from crypto import rsa_keypair
+from crypto.exceptions import CryptoError
 from crypto.key_wrapper import RSAOAEPKeyWrapper
 from metadata.protection import MetadataProtectionKeys
 from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
 from security.password_hasher import MIN_PASSWORD_LENGTH
 from ui.pages.base_page import BasePage
+from ui.widgets.busy import busy_cursor, progress_dialog
 from usb.device_detector import USBDevice, USBDeviceDetector
 from usb.device_validator import USBDeviceValidator
 from usb.exceptions import ContainerOverwriteError, USBError
@@ -304,7 +306,8 @@ class DevicePage(BasePage):
     def _get_key_wrapper(self) -> RSAOAEPKeyWrapper:
         if self._key_wrapper is None:
             self._show_status("Generating session key pair (RSA-4096)...")
-            keypair = rsa_keypair.generate_rsa_keypair()
+            with busy_cursor():
+                keypair = rsa_keypair.generate_rsa_keypair()
             self._key_wrapper = RSAOAEPKeyWrapper(keypair.public_key, keypair.private_key)
         return self._key_wrapper
 
@@ -333,8 +336,14 @@ class DevicePage(BasePage):
         if not path:
             return
 
-        private_pem = rsa_keypair.serialize_private_key(key_wrapper.private_key, passphrase.encode("utf-8"))
-        Path(path).write_bytes(private_pem)
+        try:
+            private_pem = rsa_keypair.serialize_private_key(key_wrapper.private_key, passphrase.encode("utf-8"))
+            Path(path).write_bytes(private_pem)
+        except (CryptoError, OSError) as exc:
+            logger.error("Failed to export private key to %s: %s", path, exc)
+            self._show_status(f"Failed to export private key: {exc}", ok=False)
+            return
+
         self._show_status(f"Exported encrypted private key to {path}. Keep it and its passphrase safe.")
         logger.info("Exported session file-wrapping private key to %s", path)
 
@@ -348,16 +357,17 @@ class DevicePage(BasePage):
         key_wrapper = self._get_key_wrapper()
 
         try:
-            result = self._service.store_file(
-                source_path=self._source_path,
-                device=self._selected_device,
-                key_wrapper=key_wrapper,
-                owner_id=self._owner_id(),
-                overwrite=overwrite,
-                protection_keys=self._protection_keys,
-                metadata_repository=self._metadata_repository,
-                bind_to_device=True,
-            )
+            with progress_dialog(self, "Encrypting and writing secure container..."):
+                result = self._service.store_file(
+                    source_path=self._source_path,
+                    device=self._selected_device,
+                    key_wrapper=key_wrapper,
+                    owner_id=self._owner_id(),
+                    overwrite=overwrite,
+                    protection_keys=self._protection_keys,
+                    metadata_repository=self._metadata_repository,
+                    bind_to_device=True,
+                )
         except ContainerOverwriteError:
             if self._confirm_overwrite():
                 self._write_container(overwrite=True)
@@ -379,11 +389,12 @@ class DevicePage(BasePage):
 
     def _deep_verify(self, result: SecureWriteResult, key_wrapper: RSAOAEPKeyWrapper) -> None:
         try:
-            self._service.verify_stored_file(
-                container_path=result.destination,
-                key_wrapper=key_wrapper,
-                protection_keys=result.protection_keys,
-            )
+            with progress_dialog(self, "Verifying secure container..."):
+                self._service.verify_stored_file(
+                    container_path=result.destination,
+                    key_wrapper=key_wrapper,
+                    protection_keys=result.protection_keys,
+                )
         except USBError as exc:
             logger.error("Deep verification failed for %s: %s", result.destination, exc)
             self._show_status(f"Deep verification FAILED: {exc}", ok=False)

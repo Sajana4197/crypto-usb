@@ -179,3 +179,28 @@ def test_wrong_passphrase_fails_to_load_key(tmp_path, decryption_page):
 
     assert decryption_page._key_wrapper is None
     assert "failed" in decryption_page.status_label.text().lower()
+
+
+def test_corrupt_container_shows_an_error_instead_of_crashing(tmp_path, decryption_page):
+    corrupt = tmp_path / "corrupt.cusc"
+    corrupt.write_bytes(b"not a real secure container")
+
+    decryption_page._selected_container = corrupt
+    decryption_page._key_wrapper = object()  # any non-None sentinel
+
+    decryption_page._on_view_clicked()  # must not raise
+
+    assert decryption_page._active_viewer is None
+    assert "could not read" in decryption_page.status_label.text().lower()
+
+
+def test_deleted_container_shows_an_error_instead_of_crashing(tmp_path, decryption_page):
+    missing = tmp_path / "gone.cusc"
+
+    decryption_page._selected_container = missing
+    decryption_page._key_wrapper = object()
+
+    decryption_page._on_view_clicked()  # must not raise
+
+    assert decryption_page._active_viewer is None
+    assert "could not read" in decryption_page.status_label.text().lower()

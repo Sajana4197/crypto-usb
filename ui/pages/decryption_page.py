@@ -51,7 +51,9 @@ from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
 from tracking.tracking_service import UsageTracker
 from ui.pages.base_page import BasePage
+from ui.widgets.busy import progress_dialog
 from usb.device_detector import USBDevice, USBDeviceDetector
+from usb.exceptions import USBError
 from usb.secure_access_service import SecureAccessService
 from usb.secure_storage_service import SecureStorageService
 from validation.machine_fingerprint import compute_machine_fingerprint
@@ -346,7 +348,12 @@ class DecryptionPage(BasePage):
             return
 
         owner_id = self._session_manager.current.owner_id
-        file_id, encrypted_bytes = self._storage_service.read_encrypted_file_bytes(self._selected_container)
+        try:
+            file_id, encrypted_bytes = self._storage_service.read_encrypted_file_bytes(self._selected_container)
+        except (USBError, OSError) as exc:
+            logger.error("Failed to read secure container %s: %s", self._selected_container, exc)
+            self._show_status(f"Could not read {self._selected_container.name}: {exc}", ok=False)
+            return
 
         access_service = SecureAccessService(self._metadata_repository, usage_tracker=self._usage_tracker)
 
@@ -361,17 +368,20 @@ class DecryptionPage(BasePage):
             content = bytes(buffer)
             viewer.display(content, _sniff_content_type(content))
 
-        outcome = access_service.attempt_access(
-            file_id,
-            encrypted_bytes,
-            self._key_wrapper,
-            self._protection_keys,
-            _on_granted,
-            current_device=self._selected_device,
-            current_usb_identifier=compute_usb_identifier(self._selected_device) if self._selected_device else None,
-            current_machine_fingerprint=compute_machine_fingerprint(),
-            user=owner_id,
-        )
+        with progress_dialog(self, "Validating and decrypting..."):
+            outcome = access_service.attempt_access(
+                file_id,
+                encrypted_bytes,
+                self._key_wrapper,
+                self._protection_keys,
+                _on_granted,
+                current_device=self._selected_device,
+                current_usb_identifier=(
+                    compute_usb_identifier(self._selected_device) if self._selected_device else None
+                ),
+                current_machine_fingerprint=compute_machine_fingerprint(),
+                user=owner_id,
+            )
 
         if not outcome.granted:
             assert outcome.deception is not None

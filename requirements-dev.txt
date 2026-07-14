@@ -1,0 +1,6 @@
+# Development/build-only tools — not required to run the application,
+# only to lint the code or build a standalone executable (see
+# packaging/README.md). Runtime dependencies are in requirements.txt.
+
+ruff>=0.15
+pyinstaller>=6.21

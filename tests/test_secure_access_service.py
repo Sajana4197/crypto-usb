@@ -15,7 +15,6 @@ from metadata.hashing import compute_integrity_hash
 from metadata.models import DeviceBinding, ExpiryRules, UsagePolicy
 from metadata.protection import MetadataProtector, generate_protection_keys
 from metadata.repository import MetadataRepository
-from usb.device_detector import USBDevice
 from usb.secure_access_service import SecureAccessService, _map_validation_failure_to_trigger
 from validation.validation_engine import ValidationReport
 

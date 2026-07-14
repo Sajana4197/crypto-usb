@@ -1,0 +1,3 @@
+{
+    'usb': ['pyi_rth_usb_noop.py'],
+}

@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog
 
 from app.config import ConfigManager
+from app.error_handling import install_excepthook
 from core.constants import APP_NAME, APP_ORGANIZATION, APP_VERSION, LOCAL_OWNER_ID
 from core.logger import get_logger, setup_logging
 from crypto.secure_cleanup import CleanupReason, cleanup
@@ -42,6 +43,7 @@ def bootstrap() -> tuple[QApplication, Optional[MainWindow]]:
     setup_logging(config_manager.config.log_level)
     logger = get_logger(__name__)
     logger.info("Starting %s v%s", APP_NAME, APP_VERSION)
+    install_excepthook()
 
     db_manager = DatabaseManager()
     db_manager.initialize()

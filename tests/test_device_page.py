@@ -227,3 +227,16 @@ def test_export_key_cancelled_save_dialog_does_not_write(tmp_path):
         page._on_export_key_clicked()
 
     assert list(tmp_path.glob("*.pem")) == []
+
+
+def test_export_key_write_failure_shows_error_instead_of_crashing(tmp_path):
+    page = _make_page()
+    # A directory, not a file: writing to it raises OSError.
+    destination = tmp_path / "a-directory"
+    destination.mkdir()
+
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), \
+         patch.object(QFileDialog, "getSaveFileName", return_value=(str(destination), "")):
+        page._on_export_key_clicked()  # must not raise
+
+    assert "failed to export" in page.status_label.text().lower()

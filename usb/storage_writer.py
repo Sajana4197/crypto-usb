@@ -57,6 +57,16 @@ class SecureStorageWriter:
             )
 
         name = filename or f"{container.file_id}{CONTAINER_EXTENSION}"
+        if name != Path(name).name or name in (".", ".."):
+            # Defense in depth: nothing in this codebase currently passes a
+            # caller-supplied `filename` (it's always a server-generated
+            # `file_id`), but this method's own contract should not rely on
+            # that staying true forever — reject anything with a directory
+            # component (`../`, an absolute path, ...) rather than silently
+            # writing outside `device.mount_point`. `Path("..").name` is
+            # `".."` itself on Windows (unlike POSIX), so `".."`/"."` need
+            # an explicit check rather than relying on the `.name` compare.
+            raise ContainerWriteError(f"Invalid container filename {name!r}: must not contain a path")
         destination = Path(device.mount_point) / name
 
         if destination.exists() and not overwrite:

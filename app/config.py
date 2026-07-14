@@ -8,7 +8,7 @@ file exists yet or a field is missing/invalid.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 from core.constants import DEFAULT_LOG_LEVEL
 from utils.paths import get_config_path

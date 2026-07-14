@@ -161,6 +161,20 @@ QScrollBar::handle:vertical {
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0px;
 }
+QProgressBar {
+    background-color: #20212b;
+    border: 1px solid #2a2b35;
+    border-radius: 6px;
+    text-align: center;
+    color: #e8e8ec;
+}
+QProgressBar::chunk {
+    background-color: #3a5bd9;
+    border-radius: 5px;
+}
+QMessageBox, QInputDialog, QDialog {
+    background-color: #1e1f26;
+}
 """
 
 _LIGHT_QSS = """
@@ -316,6 +330,20 @@ QScrollBar::handle:vertical {
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0px;
+}
+QProgressBar {
+    background-color: #ffffff;
+    border: 1px solid #e1e2ea;
+    border-radius: 6px;
+    text-align: center;
+    color: #1c1d24;
+}
+QProgressBar::chunk {
+    background-color: #3a5bd9;
+    border-radius: 5px;
+}
+QMessageBox, QInputDialog, QDialog {
+    background-color: #f5f6fa;
 }
 """
 

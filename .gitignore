@@ -11,3 +11,11 @@ logs/
 .idea/
 
 graphify-out/
+
+# PyInstaller build output (see packaging/crypto_usb.spec)
+/build/
+/dist/
+
+# Inno Setup output (see packaging/installer.iss)
+packaging/Output/
+

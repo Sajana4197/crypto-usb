@@ -7,9 +7,29 @@ hardcode or re-derive a path.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    # Running from a PyInstaller build: `__file__`-relative resolution
+    # breaks here, since this module is imported from inside the bundled
+    # PYZ archive rather than from a real file on disk next to `main.py`
+    # (a naive `Path(__file__).resolve().parent.parent` would resolve to
+    # somewhere inside the frozen bundle's internals, not a stable,
+    # writable location next to the installed executable). Anchor
+    # writable runtime data (`data/`, `logs/`) to the executable's own
+    # directory instead — same directory they live in when running from
+    # source next to `main.py`.
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+    # Bundled, read-only assets (`resources/`) are unpacked by PyInstaller
+    # to `sys._MEIPASS` (the onedir build's `_internal/` folder, or a
+    # temp extraction directory for a onefile build) — see
+    # `packaging/crypto_usb.spec`'s `datas` entry — which is not
+    # necessarily the same directory as the executable itself.
+    _BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    _BUNDLE_ROOT = PROJECT_ROOT
 
 
 def get_project_root() -> Path:
@@ -17,7 +37,7 @@ def get_project_root() -> Path:
 
 
 def get_resources_dir() -> Path:
-    return PROJECT_ROOT / "resources"
+    return _BUNDLE_ROOT / "resources"
 
 
 def get_icons_dir() -> Path:

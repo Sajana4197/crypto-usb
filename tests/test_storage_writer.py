@@ -10,7 +10,12 @@ from metadata.hashing import compute_integrity_hash
 from metadata.models import FileMetadata
 from metadata.protection import MetadataProtector, generate_protection_keys
 from usb.device_detector import USBDevice
-from usb.exceptions import ContainerOverwriteError, ContainerVerificationError, DeviceValidationError
+from usb.exceptions import (
+    ContainerOverwriteError,
+    ContainerVerificationError,
+    ContainerWriteError,
+    DeviceValidationError,
+)
 from usb.secure_container import SecureContainer
 from usb.storage_writer import SecureStorageWriter
 
@@ -69,6 +74,20 @@ def test_write_container_refuses_overwrite_by_default(tmp_path, wrapper):
     writer.write_container(_container(wrapper), device, filename="dup.cusc")
     with pytest.raises(ContainerOverwriteError):
         writer.write_container(_container(wrapper), device, filename="dup.cusc")
+
+
+@pytest.mark.parametrize(
+    "malicious_name",
+    ["../escaped.cusc", "../../escaped.cusc", "sub/escaped.cusc", "C:\\escaped.cusc", ".."],
+)
+def test_write_container_rejects_filenames_with_a_path_component(tmp_path, wrapper, malicious_name):
+    device = _device(str(tmp_path))
+
+    with pytest.raises(ContainerWriteError):
+        SecureStorageWriter().write_container(_container(wrapper), device, filename=malicious_name)
+
+    # Nothing should have been written anywhere outside (or inside) the device dir.
+    assert list(tmp_path.rglob("*.cusc")) == []
 
 
 def test_write_container_overwrite_true_replaces_file(tmp_path, wrapper):

@@ -7,15 +7,43 @@ key invalidation, a deception module, usage tracking, and RAM-only decryption.
 
 ## Status
 
-**Phase 1 — Foundation** is complete: project scaffolding, configuration,
-logging, SQLite initialization, and the PySide6 UI shell (theme manager,
-navigation, placeholder pages). No cryptographic functionality is implemented
-yet — that begins in the Crypto Core phase.
+**All 15 phases are complete.** The write side (Device Validation page:
+encrypt a file, wrap its key, store it as a `.cusc` secure container bound to
+a specific USB device) and the read side (Decrypt & View page: authenticate,
+validate, decrypt strictly in RAM, view once) share the same metadata
+repository, protection keys, and usage tracker, so a file written by one page
+can be validated and read back by the other end to end. Phase 15 (this one)
+hardened, polished, and packaged the application for demonstration without
+changing or weakening any of the above — see `REQUIREMENTS.md` for the full
+requirement-by-requirement traceability table and security review notes.
+
+Implemented modules (see the in-app Dashboard for the same list):
+
+- Hybrid Encryption (AES-256-GCM + RSA/ECC key wrapping)
+- Metadata-Driven Access Control
+- Device Validation (USB + machine fingerprinting)
+- Secure Storage Layer (encrypted `.cusc` containers)
+- User Authentication (password and private-key)
+- Validation Engine (device, integrity, tampering checks)
+- One-Time Access Enforcement
+- Key Invalidation (crypto-shredding)
+- RAM-Only Decryption
+- Secure Controlled Viewer
+- Deception Module (indistinguishable decoy responses on repeat/invalid access)
+- Usage Tracking (tamper-evident access log)
+- Secure Cleanup (RAM/key wiping on success, failure, or exit)
+- Full Workflow Integration
+
+553 automated tests pass (`pytest`), spanning unit, integration, UI-level,
+and end-to-end demo-script coverage. Four navigation pages (Metadata,
+Access Security, Deception Module, Usage Tracking) are documented,
+honestly-labeled UI stubs over already-implemented, already-tested backend
+modules — see the "Known UI gaps" section of `REQUIREMENTS.md`.
 
 ## Requirements
 
 - Python 3.11+
-- Windows (uses `pywin32` for device/OS integration in later phases)
+- Windows (uses `pywin32` for device/OS integration)
 
 ## Setup
 
@@ -31,30 +59,39 @@ pip install -r requirements.txt
 python main.py
 ```
 
+On first launch you'll be asked to create a local account (password or
+private-key). See `REQUIREMENTS.md` for what each part of the application
+does, and `packaging/README.md` if you want a standalone `.exe` instead of
+running from source.
+
 ## Testing
 
 ```powershell
+pip install -r requirements-dev.txt   # adds ruff (lint) and pyinstaller (packaging)
 pytest
+ruff check app core crypto database deception metadata security tracking usb validation viewer ui utils main.py
 ```
 
 ## Project layout
 
 ```
-app/            Application composition root: entry point, config system
+app/            Application composition root: entry point, config, persisted protection keys, error handling
 core/           Cross-cutting foundation: constants, logging
-crypto/         Hybrid AES + RSA/ECC encryption engine (future phase)
-metadata/       Secure metadata-driven access control (future phase)
+crypto/         Hybrid AES-256-GCM + RSA/ECC encryption engine, key wrapping, secure cleanup
+metadata/       Secure metadata-driven access control and integrity protection
 database/       SQLite initialization and connection management
-security/       One-time access enforcement, key invalidation, RAM-only decryption (future phase)
-viewer/         RAM-only secure file viewer (future phase)
-usb/            USB device validation (future phase)
-deception/      Deception module (future phase)
-tracking/       Usage monitoring and access tracking (future phase)
-validation/     User authentication and device validation (future phase)
-ui/             PySide6 UI: main window, theme manager, navigation, pages
+security/       Authentication sessions, one-time access enforcement, key invalidation
+viewer/         RAM-only secure file viewer
+usb/            USB device detection, secure storage/access services
+deception/      Deception module (fabricated decoy responses on denied access)
+tracking/       Usage monitoring and tamper-evident access log
+validation/     Device/machine fingerprinting and validation engine
+ui/             PySide6 UI: main window, theme manager, navigation, pages, busy/progress widgets
 utils/          Shared utility helpers (path resolution)
 resources/      Icons and static assets
-tests/          Automated tests
+packaging/      PyInstaller spec + Inno Setup installer script (see packaging/README.md)
+tests/          Automated tests (553 passing)
+REQUIREMENTS.md Requirement-by-requirement traceability + security review notes
 ```
 
 ## Data locations
@@ -63,5 +100,14 @@ tests/          Automated tests
 - Application config: `data/config.json`
 - Logs: `logs/app.log`
 
-Both `data/` and `logs/` are created automatically at runtime and are
-git-ignored.
+Both `data/` and `logs/` are created automatically at runtime next to
+`main.py` (or next to the installed `.exe` in a packaged build — see
+`packaging/README.md`) and are git-ignored.
+
+## Packaging
+
+A standalone Windows executable can be built with PyInstaller, and an
+installer with Inno Setup. See `packaging/README.md` — including two
+real packaging bugs (a third-party-library name collision, and a
+project-root path resolution bug) this process found and fixed, verified
+against an actual built-and-run executable.
