@@ -15,7 +15,7 @@ already fully implemented and tested at the service layer but had no UI.
 | 3 | Metadata-driven access control (expiry, one-time access, device binding, encrypted+HMAC'd at rest) | `metadata/models.py`, `metadata/controller.py`, `metadata/protection.py`, `metadata/repository.py`, `metadata/hashing.py` | `tests/test_metadata_*.py` |
 | 4 | USB device detection & validation (removable, writable, capacity) | `usb/device_detector.py`, `usb/device_validator.py` | `tests/test_device_detector.py`, `tests/test_device_validator.py` |
 | 5 | Secure storage layer (self-contained `.cusc` container, atomic write, overwrite protection, post-write verification) | `usb/secure_container.py`, `usb/storage_writer.py`, `usb/secure_storage_service.py` | `tests/test_secure_container.py`, `tests/test_storage_writer.py`, `tests/test_secure_storage_service.py` |
-| 6 | User authentication (password and private-key, brute-force lockout) | `security/auth_controller.py`, `security/password_hasher.py`, `security/key_authenticator.py`, `security/lockout_policy.py`, `security/account_repository.py` | `tests/test_auth_controller.py`, `tests/test_password_hasher.py`, `tests/test_key_authenticator.py`, `tests/test_lockout_policy.py`, `tests/test_account_repository.py` |
+| 6 | User authentication (password and private-key, brute-force lockout, password change & one-time-recovery-code reset) | `security/auth_controller.py`, `security/password_hasher.py`, `security/key_authenticator.py`, `security/lockout_policy.py`, `security/account_repository.py`, `ui/dialogs/recovery_dialog.py`, `ui/pages/settings_page.py` | `tests/test_auth_controller.py`, `tests/test_password_hasher.py`, `tests/test_key_authenticator.py`, `tests/test_lockout_policy.py`, `tests/test_account_repository.py`, `tests/test_auth_dialog.py`, `tests/test_settings_page.py` |
 | 7 | Device/machine binding & fingerprinting | `validation/usb_identifier.py`, `validation/machine_fingerprint.py`, `validation/device_binding_validator.py` | `tests/test_usb_identifier.py`, `tests/test_machine_fingerprint.py`, `tests/test_device_binding_validator.py` |
 | 8 | Validation engine (every access-time check: HMAC, structural integrity, file integrity, expiry, access count, device binding) | `validation/validation_engine.py` | `tests/test_validation_engine.py` |
 | 9 | One-time access enforcement (crypto-shredding: decoy key swap, indistinguishable from an unused file) | `metadata/one_time_access.py` | `tests/test_one_time_access_enforcer.py` |
@@ -64,6 +64,48 @@ services, exactly like `DevicePage`/`DecryptionPage` (Phase 14):
 `ui/pages/encryption_page.py` remains an orphaned file-queue preview;
 `ui/pages/device_page.py` is still the actual working write-side page —
 that particular consolidation was out of scope for Phase 16 too.
+
+## Password change & recovery (Phase 17)
+
+Extends requirement #6 (User authentication) rather than adding a new
+numbered requirement: password accounts can now change their password
+in-app and recover from a forgotten one, without weakening brute-force
+protection.
+
+- **Recovery code issuance** — `AuthController.register_password_account`
+  now also generates a random 24-character recovery code, hashes it with
+  the same scrypt scheme as the password itself (`PasswordCredential`,
+  stored in the new `UserAccount.recovery_code_hash` field /
+  `accounts.recovery_code_hash_json` column — migrated in place for
+  pre-Phase-17 databases via `AccountRepository.ensure_schema`), and
+  returns the plaintext code once. `ui/dialogs/recovery_dialog.RecoveryCodeDialog`
+  shows it exactly once, right after registration succeeds, with an
+  explicit "it won't be shown again" warning.
+- **Change password** — `AuthController.change_password` verifies the
+  current password and re-hashes the new one, gated by the same
+  `LockoutPolicy` as a normal sign-in. It also *rotates* the recovery
+  code — a fresh one is generated and hashed in, invalidating the old
+  one — since an attacker who learned the old code should not be able
+  to use it after the legitimate owner changes their password. Exposed
+  in-app via a "Change Password" section on
+  `ui/pages/settings_page.SettingsPage`, shown only for password
+  accounts (private-key accounts see an explanatory note instead —
+  their enrolled key file is their recovery mechanism); the new code is
+  shown once more via the same `RecoveryCodeDialog` as registration.
+- **Reset via recovery code** — `AuthController.reset_password_with_recovery_code`
+  verifies the recovery code against its hash and re-hashes the new
+  password, also gated by `LockoutPolicy` (repeated bad codes lock the
+  account exactly like repeated bad passwords). The code is single-use:
+  a successful reset also rotates in a fresh recovery code (the one just
+  used stops working), shown once more via `RecoveryCodeDialog` before
+  the reset dialog closes. Exposed via a "Forgot
+  password?" link on the password sign-in screen
+  (`ui/dialogs/recovery_dialog.PasswordResetDialog`).
+
+Private-key accounts never get a `recovery_code_hash` — attempting a
+recovery-code reset against one fails like a wrong-method sign-in
+attempt (and still counts toward lockout), since there is no code to
+check it against.
 
 ## Security review (Phase 15)
 

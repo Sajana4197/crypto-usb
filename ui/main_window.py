@@ -26,6 +26,7 @@ from deception.event_repository import DeceptionEventRepository
 from metadata.protection import MetadataProtectionKeys
 from metadata.repository import MetadataRepository
 from security.account_repository import AccountRepository
+from security.auth_controller import AuthController
 from security.auth_session import SessionManager
 from tracking.repository import TrackingRepository
 from tracking.tracking_service import UsageTracker
@@ -75,11 +76,19 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         layout.addWidget(self.stack, 1)
 
-        self.settings_page = SettingsPage(current_theme=theme_manager.current_theme)
-        self.settings_page.theme_changed.connect(self._on_theme_changed)
-
         services = self._build_shared_services()
         metadata_repository, protection_keys, usage_tracker, account_repository, deception_event_repository = services
+
+        current_session = self.session_manager.current if self.session_manager else None
+        current_owner_id = current_session.owner_id if current_session else None
+        auth_controller = AuthController(account_repository) if account_repository is not None else None
+
+        self.settings_page = SettingsPage(
+            current_theme=theme_manager.current_theme,
+            auth_controller=auth_controller,
+            owner_id=current_owner_id,
+        )
+        self.settings_page.theme_changed.connect(self._on_theme_changed)
 
         self._pages = {
             "dashboard": DashboardPage(),

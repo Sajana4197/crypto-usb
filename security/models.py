@@ -82,3 +82,9 @@ class UserAccount:
     failed_attempts: int = 0
     locked_until: Optional[datetime] = None
     last_login_at: Optional[datetime] = None
+    # Only ever set for AuthMethod.PASSWORD accounts. Private-key accounts
+    # have no recovery code — the enrolled private key file already is
+    # their recovery mechanism. Hashed with the same scrypt scheme as the
+    # password itself (see `security.password_hasher`); the plaintext code
+    # is returned once, at registration time, and never stored.
+    recovery_code_hash: Optional[PasswordCredential] = None

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hmac
 import os
+import secrets
+import string
 
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
@@ -28,6 +30,9 @@ KEY_LEN_BYTES = 32
 SALT_LEN_BYTES = 16
 
 MIN_PASSWORD_LENGTH = 8
+
+RECOVERY_CODE_LENGTH = 24
+_RECOVERY_CODE_ALPHABET = string.ascii_uppercase + string.digits
 
 
 def validate_password_strength(password: str) -> None:
@@ -53,3 +58,23 @@ def verify_password(password: str, credential: PasswordCredential) -> bool:
 def _derive(password: str, salt: bytes, n: int, r: int, p: int, key_len: int) -> bytes:
     kdf = Scrypt(salt=salt, length=key_len, n=n, r=r, p=p)
     return kdf.derive(password.encode("utf-8"))
+
+
+def generate_recovery_code() -> str:
+    """A fresh random recovery code, e.g. for showing once at registration."""
+    return "".join(secrets.choice(_RECOVERY_CODE_ALPHABET) for _ in range(RECOVERY_CODE_LENGTH))
+
+
+def hash_recovery_code(recovery_code: str) -> PasswordCredential:
+    """Hash `recovery_code` under a fresh random salt, using the same scrypt
+    scheme as `hash_password` — the plaintext is never stored.
+    """
+    salt = os.urandom(SALT_LEN_BYTES)
+    digest = _derive(recovery_code, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, KEY_LEN_BYTES)
+    return PasswordCredential(salt=salt, digest=digest, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, key_len=KEY_LEN_BYTES)
+
+
+def verify_recovery_code(recovery_code: str, credential: PasswordCredential) -> bool:
+    """Constant-time check that `recovery_code` matches `credential`."""
+    candidate = _derive(recovery_code, credential.salt, credential.n, credential.r, credential.p, credential.key_len)
+    return hmac.compare_digest(candidate, credential.digest)

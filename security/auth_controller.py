@@ -57,24 +57,32 @@ class AuthController:
 
     # -- Registration ------------------------------------------------------
 
-    def register_password_account(self, owner_id: str, password: str) -> UserAccount:
+    def register_password_account(self, owner_id: str, password: str) -> tuple[UserAccount, str]:
         """Create a new account authenticated by password. Raises
         `AccountAlreadyExistsError` if one exists, or `WeakPasswordError`
         (from `security.password_hasher`) if the password is too weak.
+
+        Also generates a one-time recovery code, hashes it into the
+        credential (same scrypt scheme as the password), and returns the
+        plaintext code alongside the account — this is the only moment it
+        is ever available; the caller must show it to the user now.
         """
         if self._repository.exists(owner_id):
             raise AccountAlreadyExistsError(f"An account already exists for owner_id={owner_id}")
 
         credential = password_hasher.hash_password(password)
+        recovery_code = password_hasher.generate_recovery_code()
+        recovery_code_hash = password_hasher.hash_recovery_code(recovery_code)
         account = UserAccount(
             owner_id=owner_id,
             auth_method=AuthMethod.PASSWORD,
             credential=credential,
             created_at=datetime.now(timezone.utc),
+            recovery_code_hash=recovery_code_hash,
         )
         self._repository.save(account)
         logger.info("Registered password account for owner_id=%s", owner_id)
-        return account
+        return account, recovery_code
 
     def register_private_key_account(self, owner_id: str, public_key_pem: bytes) -> UserAccount:
         """Create a new account authenticated by private key. Only the
@@ -128,6 +136,68 @@ class AuthController:
 
         self._fail(account, "private key")
         raise InvalidCredentialsError("Private key authentication failed")
+
+    # -- Password change & recovery ------------------------------------------
+
+    def change_password(self, owner_id: str, current_password: str, new_password: str) -> tuple[UserAccount, str]:
+        """Verify `current_password`, then re-hash and save `new_password`.
+        Subject to the same lockout policy as a normal password sign-in.
+        Raises `AccountNotFoundError`, `AccountLockedError`,
+        `InvalidCredentialsError` (wrong current password), or
+        `WeakPasswordError` (from `security.password_hasher`).
+
+        Also rotates the recovery code: a fresh one is generated and hashed
+        in, invalidating the old one, and returned alongside the account —
+        same one-time-reveal contract as `register_password_account`, since
+        an attacker who learned the old recovery code should not be able to
+        use it after the legitimate owner changes their password.
+        """
+        account = self._require_unlocked_account(owner_id, AuthMethod.PASSWORD)
+
+        assert isinstance(account.credential, PasswordCredential)
+        if password_hasher.verify_password(current_password, account.credential):
+            account.credential = password_hasher.hash_password(new_password)
+            recovery_code = password_hasher.generate_recovery_code()
+            account.recovery_code_hash = password_hasher.hash_recovery_code(recovery_code)
+            self._lockout_policy.register_success(account)
+            self._repository.save(account)
+            logger.info("Password changed for owner_id=%s", owner_id)
+            return account, recovery_code
+
+        self._fail(account, "current password")
+        raise InvalidCredentialsError("Incorrect current password")
+
+    def reset_password_with_recovery_code(
+        self, owner_id: str, recovery_code: str, new_password: str
+    ) -> tuple[UserAccount, str]:
+        """Verify `recovery_code` against its stored hash, then set
+        `new_password`. Subject to the same lockout policy as a normal
+        sign-in, so repeated bad codes cannot be used to brute-force it.
+        Raises `AccountNotFoundError`, `AccountLockedError`,
+        `InvalidCredentialsError` (wrong/missing recovery code), or
+        `WeakPasswordError`.
+
+        The recovery code is single-use: a fresh one is generated and
+        hashed in, invalidating the one just used, and returned alongside
+        the account — same one-time-reveal contract as
+        `register_password_account`/`change_password`.
+        """
+        account = self._require_unlocked_account(owner_id, AuthMethod.PASSWORD)
+
+        assert isinstance(account.credential, PasswordCredential)
+        if account.recovery_code_hash is not None and password_hasher.verify_recovery_code(
+            recovery_code, account.recovery_code_hash
+        ):
+            account.credential = password_hasher.hash_password(new_password)
+            new_recovery_code = password_hasher.generate_recovery_code()
+            account.recovery_code_hash = password_hasher.hash_recovery_code(new_recovery_code)
+            self._lockout_policy.register_success(account)
+            self._repository.save(account)
+            logger.info("Password reset via recovery code for owner_id=%s", owner_id)
+            return account, new_recovery_code
+
+        self._fail(account, "recovery code")
+        raise InvalidCredentialsError("Invalid recovery code")
 
     # -- Shared helpers ------------------------------------------------------
 

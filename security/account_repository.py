@@ -19,6 +19,7 @@ from typing import Optional
 from core.logger import get_logger
 from security.models import AuthMethod, PasswordCredential, PrivateKeyCredential, UserAccount
 
+
 logger = get_logger(__name__)
 
 _CREATE_TABLE_SQL = """
@@ -29,9 +30,12 @@ CREATE TABLE IF NOT EXISTS accounts (
     failed_attempts INTEGER NOT NULL DEFAULT 0,
     locked_until TEXT,
     created_at TEXT NOT NULL,
-    last_login_at TEXT
+    last_login_at TEXT,
+    recovery_code_hash_json TEXT
 )
 """
+
+_ADD_RECOVERY_COLUMN_SQL = "ALTER TABLE accounts ADD COLUMN recovery_code_hash_json TEXT"
 
 _CREDENTIAL_TYPES = {
     AuthMethod.PASSWORD: PasswordCredential,
@@ -48,20 +52,28 @@ class AccountRepository:
 
     def ensure_schema(self) -> None:
         self._conn.execute(_CREATE_TABLE_SQL)
+        existing_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(accounts)")}
+        if "recovery_code_hash_json" not in existing_columns:
+            self._conn.execute(_ADD_RECOVERY_COLUMN_SQL)
         self._conn.commit()
 
     def save(self, account: UserAccount) -> None:
+        recovery_code_hash_json = (
+            json.dumps(account.recovery_code_hash.to_dict()) if account.recovery_code_hash else None
+        )
         self._conn.execute(
             """
             INSERT INTO accounts
-                (owner_id, auth_method, credential_json, failed_attempts, locked_until, created_at, last_login_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (owner_id, auth_method, credential_json, failed_attempts, locked_until, created_at,
+                 last_login_at, recovery_code_hash_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_id) DO UPDATE SET
                 auth_method = excluded.auth_method,
                 credential_json = excluded.credential_json,
                 failed_attempts = excluded.failed_attempts,
                 locked_until = excluded.locked_until,
-                last_login_at = excluded.last_login_at
+                last_login_at = excluded.last_login_at,
+                recovery_code_hash_json = excluded.recovery_code_hash_json
             """,
             (
                 account.owner_id,
@@ -71,6 +83,7 @@ class AccountRepository:
                 account.locked_until.isoformat() if account.locked_until else None,
                 account.created_at.isoformat(),
                 account.last_login_at.isoformat() if account.last_login_at else None,
+                recovery_code_hash_json,
             ),
         )
         self._conn.commit()
@@ -79,7 +92,7 @@ class AccountRepository:
     def load(self, owner_id: str) -> Optional[UserAccount]:
         cur = self._conn.execute(
             "SELECT owner_id, auth_method, credential_json, failed_attempts, locked_until, "
-            "created_at, last_login_at FROM accounts WHERE owner_id = ?",
+            "created_at, last_login_at, recovery_code_hash_json FROM accounts WHERE owner_id = ?",
             (owner_id,),
         )
         row = cur.fetchone()
@@ -88,6 +101,7 @@ class AccountRepository:
 
         auth_method = AuthMethod(row[1])
         credential = _CREDENTIAL_TYPES[auth_method].from_dict(json.loads(row[2]))
+        recovery_code_hash = PasswordCredential.from_dict(json.loads(row[7])) if row[7] else None
 
         return UserAccount(
             owner_id=row[0],
@@ -97,6 +111,7 @@ class AccountRepository:
             locked_until=datetime.fromisoformat(row[4]) if row[4] else None,
             created_at=datetime.fromisoformat(row[5]),
             last_login_at=datetime.fromisoformat(row[6]) if row[6] else None,
+            recovery_code_hash=recovery_code_hash,
         )
 
     def exists(self, owner_id: str) -> bool:

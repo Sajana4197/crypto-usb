@@ -7,17 +7,19 @@ key invalidation, a deception module, usage tracking, and RAM-only decryption.
 
 ## Status
 
-**All 16 phases are complete.** The write side (Device Validation page:
+**All 17 phases are complete.** The write side (Device Validation page:
 encrypt a file, wrap its key, store it as a `.cusc` secure container bound to
 a specific USB device) and the read side (Decrypt & View page: authenticate,
 validate, decrypt strictly in RAM, view once) share the same metadata
 repository, protection keys, and usage tracker, so a file written by one page
 can be validated and read back by the other end to end. Phase 15 hardened,
-polished, and packaged the application for demonstration; Phase 16 then
-added read-only dashboard pages (Metadata, Access Security, Deception
-Module, Usage Tracking) over data that was already being correctly recorded
-— see `REQUIREMENTS.md` for the full requirement-by-requirement traceability
-table and security review notes.
+polished, and packaged the application for demonstration; Phase 16 added
+read-only dashboard pages (Metadata, Access Security, Deception Module,
+Usage Tracking) over data that was already being correctly recorded; Phase
+17 then added in-app password change and one-time-recovery-code password
+reset for password accounts — see `REQUIREMENTS.md` for the full
+requirement-by-requirement traceability table, the Phase 17 write-up, and
+security review notes.
 
 Implemented modules (see the in-app Dashboard for the same list):
 
@@ -36,7 +38,7 @@ Implemented modules (see the in-app Dashboard for the same list):
 - Secure Cleanup (RAM/key wiping on success, failure, or exit)
 - Full Workflow Integration
 
-594 automated tests pass (`pytest`), spanning unit, integration, UI-level,
+631 automated tests pass (`pytest`), spanning unit, integration, UI-level,
 and end-to-end demo-script coverage. Every navigation page is now a real,
 working view — see "UI status (Phase 16)" in `REQUIREMENTS.md` for exactly
 what each dashboard shows. `ui/pages/encryption_page.py` remains an orphaned

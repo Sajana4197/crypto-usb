@@ -156,3 +156,149 @@ def test_successful_authentication_does_not_run_failure_cleanup(controller):
         controller.authenticate_password("owner-1", "correct-password")
 
     mock_cleanup.assert_not_called()
+
+
+# -- Recovery code issuance at registration ---------------------------------
+
+
+def test_registration_returns_recovery_code(controller):
+    account, recovery_code = controller.register_password_account("owner-1", "correct-password")
+
+    assert account.owner_id == "owner-1"
+    assert len(recovery_code) == 24
+    assert account.recovery_code_hash is not None
+    assert account.recovery_code_hash.digest != recovery_code.encode("utf-8")
+
+
+def test_private_key_account_has_no_recovery_code_hash(controller, rsa_keypair_fixture):
+    public_pem = rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
+    account = controller.register_private_key_account("owner-1", public_pem)
+
+    assert account.recovery_code_hash is None
+
+
+# -- Change password ---------------------------------------------------------
+
+
+def test_change_password_success(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    controller.change_password("owner-1", "correct-password", "new-correct-password")
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.authenticate_password("owner-1", "correct-password")
+    session = controller.authenticate_password("owner-1", "new-correct-password")
+    assert session.owner_id == "owner-1"
+
+
+def test_change_password_rotates_recovery_code(controller):
+    _account, old_recovery_code = controller.register_password_account("owner-1", "correct-password")
+
+    _account, new_recovery_code = controller.change_password(
+        "owner-1", "correct-password", "new-correct-password"
+    )
+
+    assert new_recovery_code != old_recovery_code
+    assert len(new_recovery_code) == 24
+
+    # The old code no longer works...
+    with pytest.raises(InvalidCredentialsError):
+        controller.reset_password_with_recovery_code("owner-1", old_recovery_code, "another-password")
+
+    # ...but the new one does.
+    controller.reset_password_with_recovery_code("owner-1", new_recovery_code, "another-password")
+    controller.authenticate_password("owner-1", "another-password")
+
+
+def test_change_password_wrong_current_password_raises(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.change_password("owner-1", "wrong-password", "new-correct-password")
+
+
+def test_change_password_weak_new_password_raises(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    with pytest.raises(WeakPasswordError):
+        controller.change_password("owner-1", "correct-password", "weak")
+
+    # Old password still works: the weak new password was never applied.
+    controller.authenticate_password("owner-1", "correct-password")
+
+
+def test_change_password_locks_after_repeated_wrong_current_password(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    for _ in range(MAX_FAILED_ATTEMPTS):
+        with pytest.raises(InvalidCredentialsError):
+            controller.change_password("owner-1", "wrong-password", "new-correct-password")
+
+    with pytest.raises(AccountLockedError):
+        controller.change_password("owner-1", "correct-password", "new-correct-password")
+
+
+# -- Reset password with recovery code ---------------------------------------
+
+
+def test_reset_password_with_recovery_code_success(controller):
+    _account, recovery_code = controller.register_password_account("owner-1", "correct-password")
+
+    controller.reset_password_with_recovery_code("owner-1", recovery_code, "new-correct-password")
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.authenticate_password("owner-1", "correct-password")
+    session = controller.authenticate_password("owner-1", "new-correct-password")
+    assert session.owner_id == "owner-1"
+
+
+def test_reset_password_with_recovery_code_wrong_code_raises(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.reset_password_with_recovery_code("owner-1", "not-the-real-code", "new-correct-password")
+
+
+def test_reset_password_with_recovery_code_locks_after_repeated_bad_codes(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    for _ in range(MAX_FAILED_ATTEMPTS):
+        with pytest.raises(InvalidCredentialsError):
+            controller.reset_password_with_recovery_code("owner-1", "bad-code", "new-correct-password")
+
+    with pytest.raises(AccountLockedError):
+        controller.reset_password_with_recovery_code("owner-1", "bad-code", "new-correct-password")
+
+
+def test_reset_password_with_recovery_code_weak_new_password_raises(controller):
+    _account, recovery_code = controller.register_password_account("owner-1", "correct-password")
+
+    with pytest.raises(WeakPasswordError):
+        controller.reset_password_with_recovery_code("owner-1", recovery_code, "weak")
+
+
+def test_reset_password_against_private_key_account_raises(controller, rsa_keypair_fixture):
+    public_pem = rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
+    controller.register_private_key_account("owner-1", public_pem)
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.reset_password_with_recovery_code("owner-1", "any-code", "new-correct-password")
+
+
+def test_reset_password_with_recovery_code_is_single_use(controller):
+    _account, old_recovery_code = controller.register_password_account("owner-1", "correct-password")
+
+    _account, new_recovery_code = controller.reset_password_with_recovery_code(
+        "owner-1", old_recovery_code, "new-correct-password"
+    )
+
+    assert new_recovery_code != old_recovery_code
+    assert len(new_recovery_code) == 24
+
+    # The just-used code no longer works...
+    with pytest.raises(InvalidCredentialsError):
+        controller.reset_password_with_recovery_code("owner-1", old_recovery_code, "another-password")
+
+    # ...but the newly issued one does.
+    controller.reset_password_with_recovery_code("owner-1", new_recovery_code, "another-password")
+    controller.authenticate_password("owner-1", "another-password")

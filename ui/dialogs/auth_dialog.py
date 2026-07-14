@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -43,6 +44,7 @@ from security.exceptions import (
 from security.lockout_policy import MAX_FAILED_ATTEMPTS
 from security.models import AuthMethod
 from security.password_hasher import MIN_PASSWORD_LENGTH
+from ui.dialogs.recovery_dialog import PasswordResetDialog, RecoveryCodeDialog
 
 logger = get_logger(__name__)
 
@@ -206,7 +208,7 @@ class AuthDialog(QDialog):
             return
 
         try:
-            self._controller.register_password_account(self._owner_id, password)
+            _account, recovery_code = self._controller.register_password_account(self._owner_id, password)
         except WeakPasswordError as exc:
             self._show_error(str(exc))
             return
@@ -214,6 +216,8 @@ class AuthDialog(QDialog):
         # Validate credentials before continuing, rather than assuming
         # registration implies a valid session.
         self.session = self._controller.authenticate_password(self._owner_id, password)
+
+        RecoveryCodeDialog(recovery_code, parent=self).exec()
         self.accept()
 
     def _register_private_key(self) -> None:
@@ -264,7 +268,22 @@ class AuthDialog(QDialog):
         self._login_password_edit.returnPressed.connect(self._on_login_clicked)
         layout.addWidget(self._login_password_edit)
 
+        forgot_row = QHBoxLayout()
+        forgot_row.addStretch(1)
+        self._forgot_password_button = QPushButton("Forgot password?")
+        self._forgot_password_button.setFlat(True)
+        self._forgot_password_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._forgot_password_button.clicked.connect(self._on_forgot_password_clicked)
+        forgot_row.addWidget(self._forgot_password_button)
+        layout.addLayout(forgot_row)
+
         return page
+
+    def _on_forgot_password_clicked(self) -> None:
+        dialog = PasswordResetDialog(self._controller, self._owner_id, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.succeeded:
+            self._login_password_edit.clear()
+            self._show_info("Password reset. Sign in with your new password.")
 
     def _build_key_login_page(self) -> QWidget:
         page = QWidget()
@@ -352,8 +371,14 @@ class AuthDialog(QDialog):
         return row
 
     def _show_error(self, message: str) -> None:
+        self._error_label.setStyleSheet("color: #e5484d;")
         self._error_label.setText(message)
         logger.warning("Auth dialog error for owner_id=%s: %s", self._owner_id, message)
 
+    def _show_info(self, message: str) -> None:
+        self._error_label.setStyleSheet("color: #3ecf8e;")
+        self._error_label.setText(message)
+
     def _clear_error(self) -> None:
+        self._error_label.setStyleSheet("color: #e5484d;")
         self._error_label.setText("")

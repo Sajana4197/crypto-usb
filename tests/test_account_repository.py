@@ -115,3 +115,62 @@ def test_created_at_is_stable_across_updates(repository):
     repository.save(account)
 
     assert repository.load(account.owner_id).created_at == original_created_at
+
+
+# -- Recovery code hash persistence -----------------------------------------
+
+
+def test_recovery_code_hash_round_trips(repository):
+    account = _password_account()
+    account.recovery_code_hash = PasswordCredential(
+        salt=b"\x03" * 16, digest=b"\x04" * 32, n=16384, r=8, p=1, key_len=32
+    )
+    repository.save(account)
+
+    restored = repository.load(account.owner_id)
+    assert restored.recovery_code_hash == account.recovery_code_hash
+
+
+def test_recovery_code_hash_defaults_to_none(repository):
+    account = _password_account()
+    repository.save(account)
+
+    restored = repository.load(account.owner_id)
+    assert restored.recovery_code_hash is None
+
+
+def test_private_key_account_has_no_recovery_code_hash(repository):
+    account = _key_account()
+    repository.save(account)
+
+    restored = repository.load(account.owner_id)
+    assert restored.recovery_code_hash is None
+
+
+def test_ensure_schema_migrates_pre_existing_table_without_recovery_column(connection):
+    """Simulate a database created before Phase 17: an `accounts` table
+    with no `recovery_code_hash_json` column. Constructing a repository
+    against it must migrate the column in place rather than failing.
+    """
+    connection.execute(
+        """
+        CREATE TABLE accounts (
+            owner_id TEXT PRIMARY KEY,
+            auth_method TEXT NOT NULL,
+            credential_json TEXT NOT NULL,
+            failed_attempts INTEGER NOT NULL DEFAULT 0,
+            locked_until TEXT,
+            created_at TEXT NOT NULL,
+            last_login_at TEXT
+        )
+        """
+    )
+    connection.commit()
+
+    repository = AccountRepository(connection)
+    account = _password_account()
+    repository.save(account)
+
+    restored = repository.load(account.owner_id)
+    assert restored.owner_id == account.owner_id
+    assert restored.recovery_code_hash is None

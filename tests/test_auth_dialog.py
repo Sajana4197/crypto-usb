@@ -10,6 +10,7 @@ from security.account_repository import AccountRepository
 from security.auth_controller import AuthController
 from security.lockout_policy import MAX_FAILED_ATTEMPTS
 from ui.dialogs.auth_dialog import AuthDialog
+from ui.dialogs.recovery_dialog import PasswordResetDialog
 
 
 def _app():
@@ -33,8 +34,23 @@ def test_registration_mode_shown_when_no_account(controller):
     assert dialog._password_radio.isChecked() is True
 
 
-def test_password_registration_success(controller):
+class _FakeRecoveryCodeDialog:
+    """Stands in for `RecoveryCodeDialog` so registration/reset tests don't
+    block on a real modal `.exec()` — captures the code it was shown for.
+    """
+
+    last_code = None
+
+    def __init__(self, recovery_code, replaces_previous_code=False, parent=None):
+        _FakeRecoveryCodeDialog.last_code = recovery_code
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted
+
+
+def test_password_registration_success(controller, monkeypatch):
     _app()
+    monkeypatch.setattr("ui.dialogs.auth_dialog.RecoveryCodeDialog", _FakeRecoveryCodeDialog)
     dialog = AuthDialog(controller, "owner-1")
     dialog._new_password_edit.setText("correct-password")
     dialog._confirm_password_edit.setText("correct-password")
@@ -44,6 +60,23 @@ def test_password_registration_success(controller):
     assert dialog.session is not None
     assert dialog.session.owner_id == "owner-1"
     assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_password_registration_shows_recovery_code_once(controller, monkeypatch):
+    _app()
+    monkeypatch.setattr("ui.dialogs.auth_dialog.RecoveryCodeDialog", _FakeRecoveryCodeDialog)
+    dialog = AuthDialog(controller, "owner-1")
+    dialog._new_password_edit.setText("correct-password")
+    dialog._confirm_password_edit.setText("correct-password")
+
+    dialog._on_register_clicked()
+
+    assert _FakeRecoveryCodeDialog.last_code is not None
+    assert len(_FakeRecoveryCodeDialog.last_code) == 24
+    account = controller.get_account("owner-1")
+    from security.password_hasher import verify_recovery_code
+
+    assert verify_recovery_code(_FakeRecoveryCodeDialog.last_code, account.recovery_code_hash) is True
 
 
 def test_password_registration_mismatch_shows_error(controller):
@@ -202,3 +235,157 @@ def test_private_key_login_without_file_shows_error(controller):
 
     assert dialog.session is None
     assert dialog._error_label.text() != ""
+
+
+# -- Forgot password link -------------------------------------------------
+
+
+class _FakePasswordResetDialog:
+    """Stands in for `PasswordResetDialog` so link-wiring tests don't block
+    on a real modal `.exec()`.
+    """
+
+    def __init__(self, outcome_accepted: bool, succeeded: bool):
+        self._outcome_accepted = outcome_accepted
+        self.succeeded = succeeded
+
+    def __call__(self, controller, owner_id, parent=None):
+        return self
+
+    def exec(self):
+        return QDialog.DialogCode.Accepted if self._outcome_accepted else QDialog.DialogCode.Rejected
+
+
+def test_forgot_password_link_shown_for_password_accounts(controller):
+    _app()
+    controller.register_password_account("owner-1", "correct-password")
+
+    dialog = AuthDialog(controller, "owner-1")
+
+    assert dialog._forgot_password_button.text() == "Forgot password?"
+
+
+def test_forgot_password_success_shows_info_message(controller, monkeypatch):
+    _app()
+    controller.register_password_account("owner-1", "correct-password")
+    monkeypatch.setattr(
+        "ui.dialogs.auth_dialog.PasswordResetDialog", _FakePasswordResetDialog(outcome_accepted=True, succeeded=True)
+    )
+
+    dialog = AuthDialog(controller, "owner-1")
+    dialog._login_password_edit.setText("stale-text")
+    dialog._on_forgot_password_clicked()
+
+    assert dialog._login_password_edit.text() == ""
+    assert "reset" in dialog._error_label.text().lower()
+
+
+def test_forgot_password_cancelled_leaves_error_untouched(controller, monkeypatch):
+    _app()
+    controller.register_password_account("owner-1", "correct-password")
+    monkeypatch.setattr(
+        "ui.dialogs.auth_dialog.PasswordResetDialog",
+        _FakePasswordResetDialog(outcome_accepted=False, succeeded=False),
+    )
+
+    dialog = AuthDialog(controller, "owner-1")
+    dialog._on_forgot_password_clicked()
+
+    assert dialog._error_label.text() == ""
+
+
+# -- PasswordResetDialog itself --------------------------------------------
+
+
+def test_password_reset_dialog_success(controller, monkeypatch):
+    _app()
+    monkeypatch.setattr("ui.dialogs.recovery_dialog.RecoveryCodeDialog", _FakeRecoveryCodeDialog)
+    _account, recovery_code = controller.register_password_account("owner-1", "correct-password")
+
+    dialog = PasswordResetDialog(controller, "owner-1")
+    dialog._recovery_code_edit.setText(recovery_code)
+    dialog._new_password_edit.setText("brand-new-password")
+    dialog._confirm_password_edit.setText("brand-new-password")
+
+    dialog._on_reset_clicked()
+
+    assert dialog.succeeded is True
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    controller.authenticate_password("owner-1", "brand-new-password")
+
+
+def test_password_reset_dialog_shows_new_recovery_code(controller, monkeypatch):
+    _app()
+    monkeypatch.setattr("ui.dialogs.recovery_dialog.RecoveryCodeDialog", _FakeRecoveryCodeDialog)
+    _account, old_recovery_code = controller.register_password_account("owner-1", "correct-password")
+
+    dialog = PasswordResetDialog(controller, "owner-1")
+    dialog._recovery_code_edit.setText(old_recovery_code)
+    dialog._new_password_edit.setText("brand-new-password")
+    dialog._confirm_password_edit.setText("brand-new-password")
+
+    dialog._on_reset_clicked()
+
+    assert dialog.new_recovery_code is not None
+    assert dialog.new_recovery_code != old_recovery_code
+    assert _FakeRecoveryCodeDialog.last_code == dialog.new_recovery_code
+
+    # The old code is single-use: it no longer works for a second reset.
+    dialog2 = PasswordResetDialog(controller, "owner-1")
+    dialog2._recovery_code_edit.setText(old_recovery_code)
+    dialog2._new_password_edit.setText("another-password")
+    dialog2._confirm_password_edit.setText("another-password")
+    dialog2._on_reset_clicked()
+    assert dialog2.succeeded is False
+
+
+def test_password_reset_dialog_wrong_code_shows_error(controller):
+    _app()
+    controller.register_password_account("owner-1", "correct-password")
+
+    dialog = PasswordResetDialog(controller, "owner-1")
+    dialog._recovery_code_edit.setText("not-the-real-code")
+    dialog._new_password_edit.setText("brand-new-password")
+    dialog._confirm_password_edit.setText("brand-new-password")
+
+    dialog._on_reset_clicked()
+
+    assert dialog.succeeded is False
+    assert dialog._error_label.text() != ""
+
+
+def test_password_reset_dialog_mismatched_confirmation_shows_error(controller):
+    _app()
+    _account, recovery_code = controller.register_password_account("owner-1", "correct-password")
+
+    dialog = PasswordResetDialog(controller, "owner-1")
+    dialog._recovery_code_edit.setText(recovery_code)
+    dialog._new_password_edit.setText("brand-new-password")
+    dialog._confirm_password_edit.setText("different-password")
+
+    dialog._on_reset_clicked()
+
+    assert dialog.succeeded is False
+    assert "not match" in dialog._error_label.text().lower()
+
+
+def test_password_reset_dialog_locks_after_repeated_bad_codes(controller):
+    _app()
+    controller.register_password_account("owner-1", "correct-password")
+
+    for _ in range(MAX_FAILED_ATTEMPTS):
+        dialog = PasswordResetDialog(controller, "owner-1")
+        dialog._recovery_code_edit.setText("bad-code")
+        dialog._new_password_edit.setText("brand-new-password")
+        dialog._confirm_password_edit.setText("brand-new-password")
+        dialog._on_reset_clicked()
+        assert dialog.succeeded is False
+
+    dialog = PasswordResetDialog(controller, "owner-1")
+    dialog._recovery_code_edit.setText("bad-code")
+    dialog._new_password_edit.setText("brand-new-password")
+    dialog._confirm_password_edit.setText("brand-new-password")
+    dialog._on_reset_clicked()
+
+    assert dialog.succeeded is False
+    assert "locked" in dialog._error_label.text().lower()
