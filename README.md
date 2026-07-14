@@ -7,15 +7,17 @@ key invalidation, a deception module, usage tracking, and RAM-only decryption.
 
 ## Status
 
-**All 15 phases are complete.** The write side (Device Validation page:
+**All 16 phases are complete.** The write side (Device Validation page:
 encrypt a file, wrap its key, store it as a `.cusc` secure container bound to
 a specific USB device) and the read side (Decrypt & View page: authenticate,
 validate, decrypt strictly in RAM, view once) share the same metadata
 repository, protection keys, and usage tracker, so a file written by one page
-can be validated and read back by the other end to end. Phase 15 (this one)
-hardened, polished, and packaged the application for demonstration without
-changing or weakening any of the above — see `REQUIREMENTS.md` for the full
-requirement-by-requirement traceability table and security review notes.
+can be validated and read back by the other end to end. Phase 15 hardened,
+polished, and packaged the application for demonstration; Phase 16 then
+added read-only dashboard pages (Metadata, Access Security, Deception
+Module, Usage Tracking) over data that was already being correctly recorded
+— see `REQUIREMENTS.md` for the full requirement-by-requirement traceability
+table and security review notes.
 
 Implemented modules (see the in-app Dashboard for the same list):
 
@@ -34,11 +36,12 @@ Implemented modules (see the in-app Dashboard for the same list):
 - Secure Cleanup (RAM/key wiping on success, failure, or exit)
 - Full Workflow Integration
 
-553 automated tests pass (`pytest`), spanning unit, integration, UI-level,
-and end-to-end demo-script coverage. Four navigation pages (Metadata,
-Access Security, Deception Module, Usage Tracking) are documented,
-honestly-labeled UI stubs over already-implemented, already-tested backend
-modules — see the "Known UI gaps" section of `REQUIREMENTS.md`.
+594 automated tests pass (`pytest`), spanning unit, integration, UI-level,
+and end-to-end demo-script coverage. Every navigation page is now a real,
+working view — see "UI status (Phase 16)" in `REQUIREMENTS.md` for exactly
+what each dashboard shows. `ui/pages/encryption_page.py` remains an orphaned
+file-queue preview (`ui/pages/device_page.py` is the actual working
+write-side page) — the one documented, intentional exception.
 
 ## Requirements
 

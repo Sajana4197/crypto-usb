@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
 
+from deception.event_repository import DeceptionEventRepository
 from metadata.protection import generate_protection_keys
 from metadata.repository import MetadataRepository
 from security.auth_session import AuthSession, SessionManager
@@ -204,3 +205,61 @@ def test_deleted_container_shows_an_error_instead_of_crashing(tmp_path, decrypti
 
     assert decryption_page._active_viewer is None
     assert "could not read" in decryption_page.status_label.text().lower()
+
+
+# -- Deception events are recorded through the page's own engine -----------
+
+
+def test_denied_attempt_through_the_page_is_recorded_in_the_shared_event_repository(
+    tmp_path, app, metadata_repository, protection_keys, session_manager, tracker, db_connection
+):
+    event_repository = DeceptionEventRepository(db_connection)
+    page = DecryptionPage(
+        metadata_repository=metadata_repository,
+        protection_keys=protection_keys,
+        session_manager=session_manager,
+        usage_tracker=tracker,
+        deception_event_repository=event_repository,
+    )
+
+    source = tmp_path / "findings.txt"
+    source.write_text("secret", encoding="utf-8")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    device_page_helper = DevicePage(
+        metadata_repository=metadata_repository, protection_keys=protection_keys, session_manager=session_manager
+    )
+    device_page_helper._devices = [device]
+    device_page_helper._populate_table()
+    device_page_helper.table.selectRow(0)
+    device_page_helper._source_path = source
+    device_page_helper._update_write_button_state()
+    device_page_helper._on_write_clicked()
+    written = list(device_dir.glob("*.cusc"))[0]
+
+    exported_key_path = tmp_path / "key.pem"
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), patch.object(
+        QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
+    ):
+        device_page_helper._on_export_key_clicked()
+
+    page.key_path_label.setText(str(exported_key_path))
+    page.passphrase_edit.setText("a-strong-passphrase")
+    page._on_load_key_clicked()
+
+    # No device selected at all -> validation fails -> deception fires.
+    page._devices = []
+    page._selected_device = None
+    page._selected_container = written
+
+    page._on_view_clicked()
+
+    try:
+        events = event_repository.list_events()
+        assert len(events) == 1
+        assert events[0].file_id is not None
+    finally:
+        if page._active_viewer is not None and not page._active_viewer.is_closed:
+            page._active_viewer.close()

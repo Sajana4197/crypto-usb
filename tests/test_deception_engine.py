@@ -3,11 +3,13 @@
 import itertools
 import logging
 import random
+import sqlite3
 
 import pytest
 
 from deception.content_types import DeceptionContentType
 from deception.deception_engine import DeceptionEngine, DeceptionResponse
+from deception.event_repository import DeceptionEventRepository
 from deception.triggers import DeceptionTrigger
 
 FORBIDDEN_PHRASES = ["access denied", "authentication failed", "unauthorized access"]
@@ -116,3 +118,51 @@ def test_every_trigger_produces_exactly_one_log_event(engine, caplog, trigger):
 
     deception_records = [r for r in caplog.records if "Deception activated" in r.getMessage()]
     assert len(deception_records) == 1
+
+
+# -- Event repository wiring (optional, additive) ---------------------------
+
+
+@pytest.fixture
+def event_repository():
+    conn = sqlite3.connect(":memory:")
+    return DeceptionEventRepository(conn)
+
+
+def test_activate_without_a_repository_does_not_require_one(engine):
+    # No event_repository was supplied to `engine` (see the `engine` fixture) —
+    # activation must still work exactly as before.
+    response = engine.activate(DeceptionTrigger.WRONG_CREDENTIALS)
+    assert isinstance(response, DeceptionResponse)
+
+
+def test_activate_records_an_event_when_a_repository_is_supplied(event_repository):
+    engine = DeceptionEngine(rng=random.Random(1), event_repository=event_repository)
+    engine.activate(DeceptionTrigger.METADATA_TAMPERING, file_id="file-7")
+
+    events = event_repository.list_events()
+    assert len(events) == 1
+    assert events[0].trigger == DeceptionTrigger.METADATA_TAMPERING
+    assert events[0].file_id == "file-7"
+
+
+def test_recorded_event_never_stores_the_fabricated_content(event_repository):
+    engine = DeceptionEngine(rng=random.Random(1), event_repository=event_repository)
+    response = engine.activate(DeceptionTrigger.ACCESS_ALREADY_USED)
+
+    events = event_repository.list_events()
+    # DeceptionEventRecord has no `content` field at all -- structurally
+    # incapable of holding the fabricated bytes, not just "happens not to".
+    assert not hasattr(events[0], "content")
+    assert response.content not in repr(events[0]).encode("latin-1", errors="ignore")
+
+
+def test_multiple_activations_are_all_recorded_most_recent_first(event_repository):
+    engine = DeceptionEngine(rng=random.Random(2), event_repository=event_repository)
+    engine.activate(DeceptionTrigger.WRONG_CREDENTIALS, file_id="file-1")
+    engine.activate(DeceptionTrigger.DEVICE_MISMATCH, file_id="file-2")
+
+    events = event_repository.list_events()
+    assert len(events) == 2
+    assert events[0].file_id == "file-2"  # most recent first
+    assert events[1].file_id == "file-1"

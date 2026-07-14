@@ -11,6 +11,13 @@ deception was used.
 Nothing here reveals *why* access was refused: `DeceptionResponse`
 carries the trigger for the audit log only — the generated `content`
 itself never mentions credentials, devices, tampering, or expiry.
+
+When an `event_repository` is supplied, every activation is also
+recorded there (trigger, content type, file_id, timestamp — never the
+fabricated `content` itself) so `ui.pages.deception_page.DeceptionPage`
+has something queryable to show. This is purely an audit trail of
+decisions already made — nothing here reads the repository back to
+decide what to do, so it cannot change this engine's behavior.
 """
 
 from __future__ import annotations
@@ -18,7 +25,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from core.logger import get_logger
 from deception.content_generators import (
@@ -30,6 +37,9 @@ from deception.content_generators import (
 )
 from deception.content_types import MIME_TYPES, DeceptionContentType
 from deception.triggers import DeceptionTrigger
+
+if TYPE_CHECKING:
+    from deception.event_repository import DeceptionEventRepository
 
 logger = get_logger(__name__)
 
@@ -74,8 +84,13 @@ class DeceptionEngine:
     check failed; the engine decides what fake content to return.
     """
 
-    def __init__(self, rng: Optional[random.Random] = None) -> None:
+    def __init__(
+        self,
+        rng: Optional[random.Random] = None,
+        event_repository: Optional["DeceptionEventRepository"] = None,
+    ) -> None:
         self._rng = rng or random.Random()
+        self._event_repository = event_repository
 
     def activate(
         self,
@@ -102,6 +117,8 @@ class DeceptionEngine:
         )
 
         self._log_event(trigger, chosen_type, file_id)
+        if self._event_repository is not None:
+            self._event_repository.record(trigger, chosen_type, file_id, response.generated_at)
         return response
 
     def _filename_for(self, content_type: DeceptionContentType) -> str:

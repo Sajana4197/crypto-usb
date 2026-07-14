@@ -46,6 +46,8 @@ from core.logger import get_logger
 from crypto import rsa_keypair
 from crypto.exceptions import CryptoError
 from crypto.key_wrapper import RSAOAEPKeyWrapper
+from deception.deception_engine import DeceptionEngine
+from deception.event_repository import DeceptionEventRepository
 from metadata.protection import MetadataProtectionKeys
 from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
@@ -107,6 +109,7 @@ class DecryptionPage(BasePage):
         protection_keys: Optional[MetadataProtectionKeys] = None,
         session_manager: Optional[SessionManager] = None,
         usage_tracker: Optional[UsageTracker] = None,
+        deception_event_repository: Optional[DeceptionEventRepository] = None,
         parent=None,
     ) -> None:
         super().__init__(
@@ -123,6 +126,13 @@ class DecryptionPage(BasePage):
         self._session_manager = session_manager
         self._usage_tracker = usage_tracker
         self._storage_service = SecureStorageService()
+        # A single DeceptionEngine instance per page, so every denied attempt
+        # in this session is recorded through the same (optional) audit
+        # trail — see ui.pages.deception_page.DeceptionPage for the read-only
+        # view over it. `deception_event_repository=None` is fully supported:
+        # the engine still fabricates decoy content, it just has nowhere to
+        # log the activation, exactly as before this repository existed.
+        self._deception_engine = DeceptionEngine(event_repository=deception_event_repository)
 
         self._devices: list[USBDevice] = []
         self._selected_device: USBDevice | None = None
@@ -355,7 +365,9 @@ class DecryptionPage(BasePage):
             self._show_status(f"Could not read {self._selected_container.name}: {exc}", ok=False)
             return
 
-        access_service = SecureAccessService(self._metadata_repository, usage_tracker=self._usage_tracker)
+        access_service = SecureAccessService(
+            self._metadata_repository, usage_tracker=self._usage_tracker, deception_engine=self._deception_engine
+        )
 
         viewer = SecureViewerWidget()
         viewer.setWindowTitle(self._selected_container.name)

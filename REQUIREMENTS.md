@@ -4,7 +4,9 @@ Maps each approved research requirement for *A Cryptographic Security Layer
 for USB Storage* to the module(s) that implement it and the automated tests
 that verify it. This is the artifact Phase 15 ("prepare for demonstration")
 produces to confirm every requirement has actually been built and tested,
-not just listed on the Dashboard page.
+not just listed on the Dashboard page. Phase 16 ("close the UI gap") then
+built read-only dashboard pages over the four requirements that were
+already fully implemented and tested at the service layer but had no UI.
 
 | # | Requirement | Implementing module(s) | Verified by |
 |---|---|---|---|
@@ -26,30 +28,42 @@ not just listed on the Dashboard page.
 | 16 | Full workflow integration (write → validate → decrypt → view → track → burn/deceive, sharing one metadata/tracking store) | `usb/secure_storage_service.py`, `usb/secure_access_service.py`, `ui/main_window.py`, `ui/pages/device_page.py`, `ui/pages/decryption_page.py`, `app/protection_keys.py` | `tests/test_integration_workflow.py`, `tests/test_decryption_page.py`, `tests/test_e2e_demo.py` |
 | 17 | Graceful, non-crashing error handling | `app/error_handling.py`, per-page `try`/`except` blocks | `tests/test_error_handling.py`, `tests/test_device_page.py`, `tests/test_decryption_page.py` |
 | 18 | Path-traversal hardening on device writes | `usb/storage_writer.py` | `tests/test_storage_writer.py` |
+| 19 | Deception activation audit trail (queryable record of trigger/content-type/file_id/timestamp — never the fabricated content) | `deception/event_repository.py`, wired into `deception/deception_engine.py` | `tests/test_deception_event_repository.py`, `tests/test_deception_engine.py`, `tests/test_deception_page.py` |
+| 20 | Usage Tracking dashboard (read-only view over the tamper-evident log, with a log-integrity verification action) | `ui/pages/tracking_page.py` | `tests/test_tracking_page.py` |
+| 21 | Metadata dashboard (read-only view over stored metadata records) | `ui/pages/metadata_page.py` | `tests/test_metadata_page.py` |
+| 22 | Access Security dashboard (read-only view over account lockout state) | `ui/pages/security_page.py`, `security/account_repository.py::list_owner_ids` | `tests/test_security_page.py`, `tests/test_account_repository.py` |
+| 23 | Deception Module dashboard (read-only view over the new event audit trail) | `ui/pages/deception_page.py` | `tests/test_deception_page.py` |
 
-## Known UI gaps (documented, not silently skipped)
+## UI status (Phase 16)
 
-Every requirement above is fully implemented and tested **at the service
-layer** and reachable through the two working end-to-end pages (Device
-Validation for writing, Decrypt & View for reading). Four navigation pages
-are still placeholder stubs with no dashboard UI, even though the data they
-would display is already being correctly recorded:
+All four navigation pages flagged as stubs in Phase 15 are now real,
+read-only dashboards wired through `ui.main_window.MainWindow`'s shared
+services, exactly like `DevicePage`/`DecryptionPage` (Phase 14):
 
-- **Metadata** — no browsing UI over `MetadataRepository` records.
-- **Access Security** — no UI over account lockout state (`security.lockout_policy`).
-- **Deception Module** — deception events are logged (`core.logger`) but not
-  surfaced in a dashboard; no separate event store exists to query (adding
-  one was judged out of scope for a "polish, don't redesign" phase).
-- **Usage Tracking** — no UI over the tamper-evident log; `UsageTracker`
-  records every attempt correctly (see `tests/test_integration_workflow.py`),
-  it's just not visualized yet.
+- **Metadata** — table over `MetadataRepository` records: owner, access
+  count, one-time-access policy, device binding, expiry.
+- **Access Security** — table over account lockout state
+  (`security.lockout_policy.LockoutPolicy`, read-only): failed attempts,
+  locked/unlocked, seconds until unlock, last login.
+- **Usage Tracking** — table over the tamper-evident access log
+  (`tracking.tracking_service.UsageTracker.read_all_records`), plus a
+  "Verify Log Integrity" button.
+- **Deception Module** — table over a new, purpose-built audit trail
+  (`deception.event_repository.DeceptionEventRepository`). This was the
+  one place Phase 16 touched production security code: `DeceptionEngine`
+  gained an optional `event_repository` parameter that records
+  `(trigger, content_type, file_id, generated_at)` — never the fabricated
+  `content` — after `activate()` has already decided what to fabricate.
+  Nothing reads the repository back to make a decision, so this cannot
+  change the engine's behavior; it is purely an audit trail of decisions
+  already made. Confirmed by
+  `test_recorded_event_never_stores_the_fabricated_content` and
+  `test_activate_without_a_repository_does_not_require_one` (the engine
+  works identically with no repository, exactly as before Phase 16).
 
-These were flagged as a known gap before Phase 15 began and are explicitly
-out of scope for it (Phase 15's task list is polish/hardening/packaging, not
-new dashboards) — see `ui/pages/metadata_page.py`, `security_page.py`,
-`deception_page.py`, `tracking_page.py` for the honest "not yet implemented"
-placeholders. `ui/pages/encryption_page.py` is similarly an orphaned queue
-preview; `ui/pages/device_page.py` is the actual working write-side page.
+`ui/pages/encryption_page.py` remains an orphaned file-queue preview;
+`ui/pages/device_page.py` is still the actual working write-side page —
+that particular consolidation was out of scope for Phase 16 too.
 
 ## Security review (Phase 15)
 

@@ -110,3 +110,7 @@ class AccountRepository:
         if deleted:
             logger.info("Deleted account owner_id=%s", owner_id)
         return deleted
+
+    def list_owner_ids(self) -> list[str]:
+        cur = self._conn.execute("SELECT owner_id FROM accounts ORDER BY created_at")
+        return [row[0] for row in cur.fetchall()]

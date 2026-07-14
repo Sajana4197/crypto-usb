@@ -95,6 +95,17 @@ def test_delete_missing_returns_false(repository):
     assert repository.delete("nobody") is False
 
 
+def test_list_owner_ids_empty_when_no_accounts(repository):
+    assert repository.list_owner_ids() == []
+
+
+def test_list_owner_ids_returns_all_saved_accounts(repository):
+    repository.save(_password_account("owner-1"))
+    repository.save(_key_account("owner-2"))
+
+    assert sorted(repository.list_owner_ids()) == ["owner-1", "owner-2"]
+
+
 def test_created_at_is_stable_across_updates(repository):
     account = _password_account()
     repository.save(account)

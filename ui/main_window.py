@@ -22,8 +22,10 @@ from core.constants import APP_NAME, APP_VERSION
 from core.logger import get_logger
 from crypto.secure_cleanup import CleanupReason, cleanup
 from database.db_manager import DatabaseManager
+from deception.event_repository import DeceptionEventRepository
 from metadata.protection import MetadataProtectionKeys
 from metadata.repository import MetadataRepository
+from security.account_repository import AccountRepository
 from security.auth_session import SessionManager
 from tracking.repository import TrackingRepository
 from tracking.tracking_service import UsageTracker
@@ -76,7 +78,8 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(current_theme=theme_manager.current_theme)
         self.settings_page.theme_changed.connect(self._on_theme_changed)
 
-        metadata_repository, protection_keys, usage_tracker = self._build_shared_services()
+        services = self._build_shared_services()
+        metadata_repository, protection_keys, usage_tracker, account_repository, deception_event_repository = services
 
         self._pages = {
             "dashboard": DashboardPage(),
@@ -86,16 +89,17 @@ class MainWindow(QMainWindow):
                 protection_keys=protection_keys,
                 session_manager=self.session_manager,
                 usage_tracker=usage_tracker,
+                deception_event_repository=deception_event_repository,
             ),
             "devices": DevicePage(
                 metadata_repository=metadata_repository,
                 protection_keys=protection_keys,
                 session_manager=self.session_manager,
             ),
-            "metadata": MetadataPage(),
-            "security": SecurityPage(),
-            "deception": DeceptionPage(),
-            "tracking": TrackingPage(),
+            "metadata": MetadataPage(metadata_repository=metadata_repository, protection_keys=protection_keys),
+            "security": SecurityPage(account_repository=account_repository),
+            "deception": DeceptionPage(event_repository=deception_event_repository),
+            "tracking": TrackingPage(usage_tracker=usage_tracker),
             "settings": self.settings_page,
         }
         self._page_index: dict[str, int] = {}
@@ -116,24 +120,40 @@ class MainWindow(QMainWindow):
 
     def _build_shared_services(
         self,
-    ) -> tuple[Optional[MetadataRepository], Optional[MetadataProtectionKeys], Optional[UsageTracker]]:
-        """Build the `MetadataRepository`, `MetadataProtectionKeys`, and
-        `UsageTracker` every page that touches a protected file must
-        share, backed by `self.db_manager`. Returns `(None, None, None)`
-        when no `db_manager` was supplied (e.g. a test constructing a
-        bare `MainWindow`) — `DevicePage`/`DecryptionPage` both tolerate
-        that by falling back to their own standalone, non-persisted
-        defaults.
+    ) -> tuple[
+        Optional[MetadataRepository],
+        Optional[MetadataProtectionKeys],
+        Optional[UsageTracker],
+        Optional[AccountRepository],
+        Optional[DeceptionEventRepository],
+    ]:
+        """Build the shared, persisted services every page that touches
+        protected data must share, backed by `self.db_manager`: the
+        `MetadataRepository`/`MetadataProtectionKeys` and `UsageTracker`
+        the write/read pages already shared (Phase 14), plus the
+        `AccountRepository` and `DeceptionEventRepository` the read-only
+        Access Security / Deception Module dashboards need (Phase 16).
+        Returns all-`None` when no `db_manager` was supplied (e.g. a test
+        constructing a bare `MainWindow`) — every page tolerates that by
+        falling back to its own standalone, non-persisted defaults.
         """
         if self.db_manager is None:
-            return None, None, None
+            return None, None, None, None, None
 
         metadata_repository = MetadataRepository(self.db_manager.connect())
         protection_keys = load_or_create_metadata_protection_keys(self.db_manager)
         tracking_repository = TrackingRepository(self.db_manager.connect())
         tracking_keys = load_or_create_tracking_protection_keys(self.db_manager)
         usage_tracker = UsageTracker(tracking_keys, tracking_repository)
-        return metadata_repository, protection_keys, usage_tracker
+        account_repository = AccountRepository(self.db_manager.connect())
+        deception_event_repository = DeceptionEventRepository(self.db_manager.connect())
+        return (
+            metadata_repository,
+            protection_keys,
+            usage_tracker,
+            account_repository,
+            deception_event_repository,
+        )
 
     def _build_menu_bar(self) -> None:
         menu_bar = self.menuBar()
