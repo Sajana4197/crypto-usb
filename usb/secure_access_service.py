@@ -41,6 +41,7 @@ from crypto.exceptions import DecryptionError, KeyUnwrappingError
 from crypto.file_encryptor import EncryptedContainer
 from crypto.key_wrapper import KeyWrapper
 from crypto.secure_bytes import SecureBytes
+from crypto.secure_cleanup import CleanupReason, cleanup
 from crypto.secure_decryptor import SecureDecryptor
 from deception.deception_engine import DeceptionEngine, DeceptionResponse
 from deception.triggers import DeceptionTrigger
@@ -158,6 +159,7 @@ class SecureAccessService:
             logger.warning(
                 "Access denied for file_id=%s (trigger=%s); deception activated", file_id, trigger.value
             )
+            cleanup(CleanupReason.VALIDATION_FAILURE)
             return AccessOutcome(granted=False, file_id=file_id, deception=deception)
 
         metadata = report.metadata
@@ -184,6 +186,7 @@ class SecureAccessService:
                 "(one-time access already consumed, or invalid key material); deception activated",
                 file_id,
             )
+            cleanup(CleanupReason.VALIDATION_FAILURE)
             return AccessOutcome(granted=False, file_id=file_id, deception=deception)
 
         new_keys = protection_keys
@@ -191,4 +194,5 @@ class SecureAccessService:
             new_keys = self._enforcer.burn(metadata, key_wrapper, protection_keys)
 
         logger.info("Access granted and viewing completed for file_id=%s", file_id)
+        cleanup(CleanupReason.SUCCESSFUL_VIEW)
         return AccessOutcome(granted=True, file_id=file_id, protection_keys=new_keys)

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 from app.config import ConfigManager
 from core.constants import APP_NAME, APP_ORGANIZATION, APP_VERSION, LOCAL_OWNER_ID
 from core.logger import get_logger, setup_logging
+from crypto.secure_cleanup import CleanupReason, cleanup
 from database.db_manager import DatabaseManager
 from security.account_repository import AccountRepository
 from security.auth_controller import AuthController
@@ -55,6 +56,7 @@ def bootstrap() -> tuple[QApplication, Optional[MainWindow]]:
     if auth_dialog.exec() != QDialog.DialogCode.Accepted or auth_dialog.session is None:
         logger.info("Authentication was not completed; exiting")
         db_manager.close()
+        cleanup(CleanupReason.APPLICATION_EXIT)
         return app, None
     session_manager.set(auth_dialog.session)
     logger.info("Authenticated owner_id=%s via %s", auth_dialog.session.owner_id, auth_dialog.session.method.value)

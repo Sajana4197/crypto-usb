@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.logger import get_logger
+from crypto.secure_cleanup import CleanupReason, cleanup
 from security import password_hasher
 from security.account_repository import AccountRepository
 from security.exceptions import (
@@ -166,3 +167,8 @@ class AuthController:
             "Authentication failed for owner_id=%s (attempted with %s); failed_attempts=%d",
             account.owner_id, attempted_with, account.failed_attempts,
         )
+        # Any credential buffers involved in this attempt (e.g. a private
+        # key PEM / passphrase) are already wiped by whichever module held
+        # them (see `security.key_authenticator`); this records the
+        # guaranteed cleanup pass for the failed-authentication moment.
+        cleanup(CleanupReason.FAILED_AUTHENTICATION)

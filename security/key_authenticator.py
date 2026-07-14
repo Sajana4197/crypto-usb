@@ -10,6 +10,12 @@ Loading a private key only proves the passphrase was correct — the
 signature/verify step is what actually proves *this* key pairs with
 the *enrolled* public key, so a differing (even validly-encrypted) key
 pair is rejected.
+
+The caller-supplied PEM and passphrase are copied into `bytearray`
+buffers on entry and securely wiped (`crypto.secure_cleanup.wipe`) in
+a `finally` block before this method returns — on every outcome, not
+only success — so neither ever outlives the single authentication
+attempt that needed them.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from core.logger import get_logger
 from crypto import rsa_keypair
 from crypto.exceptions import CryptoError
+from crypto.secure_cleanup import wipe
 
 logger = get_logger(__name__)
 
@@ -51,26 +58,32 @@ class KeyAuthenticator:
         """Return True only if `private_key_pem` (unlocked by `passphrase`)
         pairs with `public_key_pem` — proven by signing `challenge`.
         """
+        pem_buffer = bytearray(private_key_pem)
+        passphrase_buffer = bytearray(passphrase)
         try:
-            private_key = rsa_keypair.load_private_key(private_key_pem, passphrase)
-        except CryptoError as exc:
-            logger.warning("Private key authentication failed: could not load key (%s)", type(exc).__name__)
-            return False
+            try:
+                private_key = rsa_keypair.load_private_key(pem_buffer, passphrase_buffer)
+            except CryptoError as exc:
+                logger.warning("Private key authentication failed: could not load key (%s)", type(exc).__name__)
+                return False
 
-        try:
-            signature = private_key.sign(challenge, _pss_padding(), hashes.SHA256())
+            try:
+                signature = private_key.sign(challenge, _pss_padding(), hashes.SHA256())
+            finally:
+                del private_key
+
+            try:
+                public_key = rsa_keypair.load_public_key(public_key_pem)
+            except CryptoError as exc:
+                logger.error("Private key authentication failed: enrolled public key is invalid (%s)", type(exc).__name__)
+                return False
+
+            try:
+                public_key.verify(signature, challenge, _pss_padding(), hashes.SHA256())
+                return True
+            except InvalidSignature:
+                logger.warning("Private key authentication failed: signature did not match enrolled public key")
+                return False
         finally:
-            del private_key
-
-        try:
-            public_key = rsa_keypair.load_public_key(public_key_pem)
-        except CryptoError as exc:
-            logger.error("Private key authentication failed: enrolled public key is invalid (%s)", type(exc).__name__)
-            return False
-
-        try:
-            public_key.verify(signature, challenge, _pss_padding(), hashes.SHA256())
-            return True
-        except InvalidSignature:
-            logger.warning("Private key authentication failed: signature did not match enrolled public key")
-            return False
+            wipe(pem_buffer)
+            wipe(passphrase_buffer)

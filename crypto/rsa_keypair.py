@@ -55,7 +55,7 @@ def serialize_public_key(public_key: RSAPublicKey) -> bytes:
     )
 
 
-def load_private_key(pem_data: bytes, passphrase: bytes) -> RSAPrivateKey:
+def load_private_key(pem_data: bytes | bytearray, passphrase: bytes | bytearray) -> RSAPrivateKey:
     """Load a private key from encrypted PEM. Raises CryptoError on bad data/passphrase."""
     try:
         return serialization.load_pem_private_key(pem_data, password=passphrase)

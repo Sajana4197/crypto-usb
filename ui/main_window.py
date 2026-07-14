@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QWidget
 from app.config import ConfigManager
 from core.constants import APP_NAME, APP_VERSION
 from core.logger import get_logger
+from crypto.secure_cleanup import CleanupReason, cleanup
 from ui.navigation.navigation_panel import DEFAULT_NAV_ITEMS, NavigationPanel
 from ui.pages.dashboard_page import DashboardPage
 from ui.pages.deception_page import DeceptionPage
@@ -115,4 +116,17 @@ class MainWindow(QMainWindow):
             window_width=self.width(),
             window_height=self.height(),
         )
+        self._perform_exit_cleanup()
         super().closeEvent(event)
+
+    def _perform_exit_cleanup(self) -> None:
+        """Drop the authenticated session (the in-memory "Session Key")
+        and run the guaranteed application-exit secure cleanup pass.
+        `session_manager` is only present once `app.main.bootstrap` has
+        attached it (see that module's docstring); tests that construct
+        a bare `MainWindow` are unaffected.
+        """
+        session_manager = getattr(self, "session_manager", None)
+        if session_manager is not None:
+            session_manager.clear()
+        cleanup(CleanupReason.APPLICATION_EXIT)

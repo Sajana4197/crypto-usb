@@ -2,11 +2,13 @@
 
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 
 from crypto.file_encryptor import FileEncryptor
 from crypto.key_wrapper import RSAOAEPKeyWrapper
+from crypto.secure_cleanup import CleanupReason
 from deception.triggers import DeceptionTrigger
 from metadata.controller import MetadataController
 from metadata.hashing import compute_integrity_hash
@@ -363,3 +365,44 @@ def test_mapping_falls_back_to_integrity_failure_for_unrecognized_failure():
     report = ValidationReport(file_id="f")
     report.ok = False  # a failure with no matching named check at all
     assert _map_validation_failure_to_trigger(report) is DeceptionTrigger.INTEGRITY_FAILURE
+
+
+# -- Secure cleanup runs after both granted and denied outcomes -----------
+
+
+def test_successful_view_runs_secure_cleanup(controller, container, container_bytes, service, wrapper, keys):
+    _create(controller, container, container_bytes)
+
+    with patch("usb.secure_access_service.cleanup") as mock_cleanup:
+        outcome = service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector())
+
+    assert outcome.granted is True
+    mock_cleanup.assert_called_once_with(CleanupReason.SUCCESSFUL_VIEW)
+
+
+def test_validation_failure_runs_secure_cleanup(controller, container, container_bytes, service, wrapper, keys):
+    _create(controller, container, container_bytes)
+
+    with patch("usb.secure_access_service.cleanup") as mock_cleanup:
+        outcome = service.attempt_access("file-1", b"corrupted-container-bytes", wrapper, keys, _Collector())
+
+    assert outcome.granted is False
+    mock_cleanup.assert_called_once_with(CleanupReason.VALIDATION_FAILURE)
+
+
+def test_decrypt_failure_after_validation_pass_runs_secure_cleanup(
+    controller, container, container_bytes, service, wrapper, keys
+):
+    _create(controller, container, container_bytes, usage_policy=UsagePolicy(one_time_access=True))
+    first = service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector())
+    assert first.granted is True
+
+    with patch("usb.secure_access_service.cleanup") as mock_cleanup:
+        # Reusing the now-stale `keys` after the file was burned reaches the
+        # decrypt-failure branch (metadata tampering is checked first only
+        # when the protection keys themselves are stale; here they are not,
+        # so this exercises the post-validation decrypt failure path).
+        outcome = service.attempt_access("file-1", container_bytes, wrapper, first.protection_keys, _Collector())
+
+    assert outcome.granted is False
+    mock_cleanup.assert_called_once_with(CleanupReason.VALIDATION_FAILURE)
