@@ -61,6 +61,7 @@ class SettingsPage(BasePage):
 
         self.theme_selector = QComboBox()
         self.theme_selector.addItems(["dark", "light"])
+        self.theme_selector.setMaximumWidth(260)
         self.theme_selector.setCurrentText(current_theme)
         self.theme_selector.currentTextChanged.connect(self.theme_changed.emit)
         form.addRow(QLabel("Theme:"), self.theme_selector)
@@ -108,21 +109,25 @@ class SettingsPage(BasePage):
 
         self.current_password_edit = QLineEdit()
         self.current_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.current_password_edit.setMaximumWidth(320)
         form.addRow(QLabel("Current password:"), self.current_password_edit)
 
         self.new_password_edit = QLineEdit()
         self.new_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.new_password_edit.setMaximumWidth(320)
         form.addRow(QLabel(f"New password (min {MIN_PASSWORD_LENGTH} characters):"), self.new_password_edit)
 
         self.confirm_password_edit = QLineEdit()
         self.confirm_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm_password_edit.setMaximumWidth(320)
         form.addRow(QLabel("Confirm new password:"), self.confirm_password_edit)
-
-        layout.addWidget(form_container)
 
         self.change_password_button = QPushButton("Change Password")
         self.change_password_button.clicked.connect(self._on_change_password_clicked)
-        layout.addWidget(self.change_password_button)
+        self.change_password_button.setMaximumWidth(200)
+        form.addRow("", self.change_password_button)
+
+        layout.addWidget(form_container)
 
         self.password_status_label = QLabel("")
         self.password_status_label.setWordWrap(True)

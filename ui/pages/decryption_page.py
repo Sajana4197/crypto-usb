@@ -208,10 +208,12 @@ class DecryptionPage(BasePage):
         layout.addWidget(QLabel("Passphrase:"))
         self.passphrase_edit = QLineEdit()
         self.passphrase_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.passphrase_edit.setMaximumWidth(320)
         layout.addWidget(self.passphrase_edit)
 
         self.load_key_button = QPushButton("Load Key")
         self.load_key_button.clicked.connect(self._on_load_key_clicked)
+        self.load_key_button.setMaximumWidth(180)
         layout.addWidget(self.load_key_button)
 
         return panel
@@ -234,13 +236,17 @@ class DecryptionPage(BasePage):
         self.container_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.container_table.horizontalHeader().setStretchLastSection(True)
         self.container_table.setMinimumHeight(120)
+        self.container_table.setMaximumHeight(220)
         self.container_table.itemSelectionChanged.connect(self._on_container_selected)
         layout.addWidget(self.container_table)
+
+        layout.addSpacing(10)
 
         self.view_button = QPushButton("View Selected File")
         self.view_button.setObjectName("primaryButton")
         self.view_button.setEnabled(False)
         self.view_button.clicked.connect(self._on_view_clicked)
+        self.view_button.setMaximumWidth(220)
         layout.addWidget(self.view_button)
 
         return panel
