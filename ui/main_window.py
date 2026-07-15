@@ -91,7 +91,12 @@ class MainWindow(QMainWindow):
         self.settings_page.theme_changed.connect(self._on_theme_changed)
 
         self._pages = {
-            "dashboard": DashboardPage(),
+            "dashboard": DashboardPage(
+                metadata_repository=metadata_repository,
+                account_repository=account_repository,
+                deception_event_repository=deception_event_repository,
+                usage_tracker=usage_tracker,
+            ),
             "encryption": EncryptionPage(),
             "decryption": DecryptionPage(
                 metadata_repository=metadata_repository,
@@ -117,6 +122,7 @@ class MainWindow(QMainWindow):
             self._page_index[item.page_id] = self.stack.addWidget(widget)
 
         self.navigation.page_selected.connect(self._navigate_to)
+        self._pages["dashboard"].navigate_requested.connect(self._navigate_to)
 
         self._build_menu_bar()
         self.statusBar().showMessage("Ready")
