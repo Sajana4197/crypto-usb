@@ -1,12 +1,14 @@
 """Tests for the Authentication Controller orchestration."""
 
 import sqlite3
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from crypto import rsa_keypair
 from crypto.secure_cleanup import CleanupReason
+from deception.deception_engine import DeceptionEngine
+from deception.triggers import DeceptionTrigger
 from security.account_repository import AccountRepository
 from security.auth_controller import AuthController
 from security.exceptions import (
@@ -28,6 +30,17 @@ def controller():
     return AuthController(AccountRepository(conn))
 
 
+@pytest.fixture
+def deception_engine():
+    return MagicMock(spec=DeceptionEngine)
+
+
+@pytest.fixture
+def controller_with_engine(deception_engine):
+    conn = sqlite3.connect(":memory:")
+    return AuthController(AccountRepository(conn), deception_engine=deception_engine)
+
+
 def test_register_and_authenticate_password(controller):
     controller.register_password_account("owner-1", "correct-password")
     session = controller.authenticate_password("owner-1", "correct-password")
@@ -36,10 +49,31 @@ def test_register_and_authenticate_password(controller):
     assert session.method == AuthMethod.PASSWORD
 
 
-def test_authenticate_password_wrong_password_raises(controller):
+def test_authenticate_password_wrong_password_returns_decoy_session(controller):
     controller.register_password_account("owner-1", "correct-password")
-    with pytest.raises(InvalidCredentialsError):
-        controller.authenticate_password("owner-1", "wrong-password")
+
+    session = controller.authenticate_password("owner-1", "wrong-password")
+
+    assert session.is_decoy is True
+    assert session.owner_id == "owner-1"
+    assert session.method == AuthMethod.PASSWORD
+
+
+def test_authenticate_password_wrong_password_still_counts_as_failed_attempt(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    controller.authenticate_password("owner-1", "wrong-password")
+
+    account = controller.get_account("owner-1")
+    assert account.failed_attempts == 1
+
+
+def test_authenticate_password_correct_password_is_not_a_decoy(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    session = controller.authenticate_password("owner-1", "correct-password")
+
+    assert session.is_decoy is False
 
 
 def test_register_password_twice_raises(controller):
@@ -69,21 +103,57 @@ def test_register_and_authenticate_private_key(controller, rsa_keypair_fixture):
     assert session.method == AuthMethod.PRIVATE_KEY
 
 
-def test_authenticate_private_key_wrong_key_raises(controller, rsa_keypair_fixture, other_rsa_keypair_fixture):
+def test_authenticate_private_key_wrong_key_returns_decoy_session(
+    controller, rsa_keypair_fixture, other_rsa_keypair_fixture
+):
     public_pem = rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
     wrong_private_pem = rsa_keypair.serialize_private_key(other_rsa_keypair_fixture.private_key, PASSPHRASE)
 
     controller.register_private_key_account("owner-1", public_pem)
-    with pytest.raises(InvalidCredentialsError):
-        controller.authenticate_private_key("owner-1", wrong_private_pem, PASSPHRASE)
+    session = controller.authenticate_private_key("owner-1", wrong_private_pem, PASSPHRASE)
+
+    assert session.is_decoy is True
+    assert session.owner_id == "owner-1"
+    assert session.method == AuthMethod.PRIVATE_KEY
+
+
+# -- Deception Engine activation on wrong credentials -----------------------
+
+
+def test_wrong_password_activates_deception_engine(controller_with_engine, deception_engine):
+    controller_with_engine.register_password_account("owner-1", "correct-password")
+
+    controller_with_engine.authenticate_password("owner-1", "wrong-password")
+
+    deception_engine.activate.assert_called_once_with(DeceptionTrigger.WRONG_CREDENTIALS)
+
+
+def test_wrong_private_key_activates_deception_engine(
+    controller_with_engine, deception_engine, rsa_keypair_fixture, other_rsa_keypair_fixture
+):
+    public_pem = rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
+    wrong_private_pem = rsa_keypair.serialize_private_key(other_rsa_keypair_fixture.private_key, PASSPHRASE)
+    controller_with_engine.register_private_key_account("owner-1", public_pem)
+
+    controller_with_engine.authenticate_private_key("owner-1", wrong_private_pem, PASSPHRASE)
+
+    deception_engine.activate.assert_called_once_with(DeceptionTrigger.WRONG_CREDENTIALS)
+
+
+def test_correct_password_does_not_activate_deception_engine(controller_with_engine, deception_engine):
+    controller_with_engine.register_password_account("owner-1", "correct-password")
+
+    controller_with_engine.authenticate_password("owner-1", "correct-password")
+
+    deception_engine.activate.assert_not_called()
 
 
 def test_account_locks_after_max_failed_attempts(controller):
     controller.register_password_account("owner-1", "correct-password")
 
     for _ in range(MAX_FAILED_ATTEMPTS):
-        with pytest.raises(InvalidCredentialsError):
-            controller.authenticate_password("owner-1", "wrong-password")
+        session = controller.authenticate_password("owner-1", "wrong-password")
+        assert session.is_decoy is True
 
     with pytest.raises(AccountLockedError):
         controller.authenticate_password("owner-1", "correct-password")
@@ -92,8 +162,8 @@ def test_account_locks_after_max_failed_attempts(controller):
 def test_locked_account_rejects_even_correct_password(controller):
     controller.register_password_account("owner-1", "correct-password")
     for _ in range(MAX_FAILED_ATTEMPTS):
-        with pytest.raises(InvalidCredentialsError):
-            controller.authenticate_password("owner-1", "wrong-password")
+        session = controller.authenticate_password("owner-1", "wrong-password")
+        assert session.is_decoy is True
 
     with pytest.raises(AccountLockedError) as exc_info:
         controller.authenticate_password("owner-1", "correct-password")
@@ -103,8 +173,8 @@ def test_locked_account_rejects_even_correct_password(controller):
 def test_successful_login_resets_failed_attempts(controller):
     controller.register_password_account("owner-1", "correct-password")
     for _ in range(MAX_FAILED_ATTEMPTS - 1):
-        with pytest.raises(InvalidCredentialsError):
-            controller.authenticate_password("owner-1", "wrong-password")
+        session = controller.authenticate_password("owner-1", "wrong-password")
+        assert session.is_decoy is True
 
     controller.authenticate_password("owner-1", "correct-password")
 
@@ -131,9 +201,9 @@ def test_failed_password_authentication_runs_secure_cleanup(controller):
     controller.register_password_account("owner-1", "correct-password")
 
     with patch("security.auth_controller.cleanup") as mock_cleanup:
-        with pytest.raises(InvalidCredentialsError):
-            controller.authenticate_password("owner-1", "wrong-password")
+        session = controller.authenticate_password("owner-1", "wrong-password")
 
+    assert session.is_decoy is True
     mock_cleanup.assert_called_once_with(CleanupReason.FAILED_AUTHENTICATION)
 
 
@@ -143,9 +213,9 @@ def test_failed_private_key_authentication_runs_secure_cleanup(controller, rsa_k
     controller.register_private_key_account("owner-1", public_pem)
 
     with patch("security.auth_controller.cleanup") as mock_cleanup:
-        with pytest.raises(InvalidCredentialsError):
-            controller.authenticate_private_key("owner-1", wrong_private_pem, PASSPHRASE)
+        session = controller.authenticate_private_key("owner-1", wrong_private_pem, PASSPHRASE)
 
+    assert session.is_decoy is True
     mock_cleanup.assert_called_once_with(CleanupReason.FAILED_AUTHENTICATION)
 
 
@@ -185,10 +255,11 @@ def test_change_password_success(controller):
 
     controller.change_password("owner-1", "correct-password", "new-correct-password")
 
-    with pytest.raises(InvalidCredentialsError):
-        controller.authenticate_password("owner-1", "correct-password")
+    old_password_session = controller.authenticate_password("owner-1", "correct-password")
+    assert old_password_session.is_decoy is True
     session = controller.authenticate_password("owner-1", "new-correct-password")
     assert session.owner_id == "owner-1"
+    assert session.is_decoy is False
 
 
 def test_change_password_rotates_recovery_code(controller):
@@ -246,10 +317,11 @@ def test_reset_password_with_recovery_code_success(controller):
 
     controller.reset_password_with_recovery_code("owner-1", recovery_code, "new-correct-password")
 
-    with pytest.raises(InvalidCredentialsError):
-        controller.authenticate_password("owner-1", "correct-password")
+    old_password_session = controller.authenticate_password("owner-1", "correct-password")
+    assert old_password_session.is_decoy is True
     session = controller.authenticate_password("owner-1", "new-correct-password")
     assert session.owner_id == "owner-1"
+    assert session.is_decoy is False
 
 
 def test_reset_password_with_recovery_code_wrong_code_raises(controller):

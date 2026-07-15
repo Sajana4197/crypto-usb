@@ -148,6 +148,7 @@ class SecureAccessService:
         current_usb_identifier: Optional[str] = None,
         current_machine_fingerprint: Optional[str] = None,
         user: Optional[str] = None,
+        force_deception: bool = False,
     ) -> AccessOutcome:
         """Validate and, if granted, decrypt `encrypted_file_bytes` for
         `file_id`, calling `on_granted(buffer, metadata)` with the
@@ -168,7 +169,22 @@ class SecureAccessService:
         this method only after `security.auth_controller` has already
         authenticated them, so the recorded `authentication_result` is
         always True — a failed authentication never gets this far.
+
+        `force_deception=True` is how a decoy `AuthSession`
+        (`security.auth_controller` returns one instead of raising on
+        wrong credentials) reaches this service: it short-circuits before
+        any usage-tracker session starts and before `ValidationEngine` or
+        real key material is touched, so a decoy caller never gets near
+        real metadata, real keys, or real decrypted content.
         """
+        if force_deception:
+            deception = self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS, file_id=file_id)
+            logger.warning(
+                "Access attempt for file_id=%s forced into deception (decoy session); deception activated",
+                file_id,
+            )
+            return AccessOutcome(granted=False, file_id=file_id, deception=deception)
+
         record = None
         if self._usage_tracker is not None:
             record = self._usage_tracker.start_session(

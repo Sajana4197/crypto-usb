@@ -28,6 +28,7 @@ class AuthSession:
     method: AuthMethod
     authenticated_at: datetime
     session_token: str = field(default_factory=lambda: uuid.uuid4().hex)
+    is_decoy: bool = False
 
 
 class SessionManager:

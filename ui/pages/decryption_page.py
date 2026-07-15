@@ -399,6 +399,7 @@ class DecryptionPage(BasePage):
                 ),
                 current_machine_fingerprint=compute_machine_fingerprint(),
                 user=owner_id,
+                force_deception=self._session_manager.current.is_decoy,
             )
 
         if not outcome.granted:

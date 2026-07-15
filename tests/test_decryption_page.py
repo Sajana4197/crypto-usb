@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
@@ -205,6 +205,73 @@ def test_deleted_container_shows_an_error_instead_of_crashing(tmp_path, decrypti
 
     assert decryption_page._active_viewer is None
     assert "could not read" in decryption_page.status_label.text().lower()
+
+
+# -- force_deception is threaded from a decoy session (Phase 20) -----------
+
+
+def _stub_attempt_access_call(page, tmp_path, granted: bool = False):
+    """Wire up `page` to call a mocked `SecureAccessService.attempt_access`
+    instead of the real storage/decrypt path, and return the mock so the
+    caller can inspect how it was invoked."""
+    page._selected_container = tmp_path / "container.cusc"
+    page._key_wrapper = object()  # any non-None sentinel
+    page._storage_service = MagicMock()
+    page._storage_service.read_encrypted_file_bytes.return_value = ("file-1", b"encrypted-bytes")
+
+    mock_deception = MagicMock()
+    mock_deception.content = b"decoy content"
+    mock_deception.mime_type = "text/plain"
+    mock_deception.trigger.value = "wrong_credentials"
+
+    mock_outcome = MagicMock(granted=granted, deception=None if granted else mock_deception)
+    return mock_outcome
+
+
+def test_view_click_forces_deception_for_a_decoy_session(tmp_path, app, metadata_repository, protection_keys):
+    decoy_session_manager = SessionManager()
+    decoy_session_manager.set(
+        AuthSession(
+            owner_id="owner-1",
+            method=AuthMethod.PASSWORD,
+            authenticated_at=datetime.now(timezone.utc),
+            is_decoy=True,
+        )
+    )
+    page = DecryptionPage(
+        metadata_repository=metadata_repository,
+        protection_keys=protection_keys,
+        session_manager=decoy_session_manager,
+    )
+    mock_outcome = _stub_attempt_access_call(page, tmp_path)
+
+    try:
+        with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+            mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+            page._on_view_clicked()
+
+        _, kwargs = mock_service_cls.return_value.attempt_access.call_args
+        assert kwargs["force_deception"] is True
+    finally:
+        if page._active_viewer is not None and not page._active_viewer.is_closed:
+            page._active_viewer.close()
+
+
+def test_view_click_does_not_force_deception_for_a_real_session(
+    tmp_path, decryption_page
+):
+    mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path, granted=True)
+
+    try:
+        with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+            mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+            decryption_page._on_view_clicked()
+
+        _, kwargs = mock_service_cls.return_value.attempt_access.call_args
+        assert kwargs["force_deception"] is False
+    finally:
+        if decryption_page._active_viewer is not None and not decryption_page._active_viewer.is_closed:
+            decryption_page._active_viewer.close()
 
 
 # -- Deception events are recorded through the page's own engine -----------

@@ -31,7 +31,6 @@ from metadata.protection import generate_protection_keys
 from metadata.repository import MetadataRepository
 from security.account_repository import AccountRepository
 from security.auth_controller import AuthController
-from security.exceptions import InvalidCredentialsError
 from tracking.repository import TrackingRepository
 from tracking.tamper_evident_log import generate_tracking_keys
 from tracking.tracking_service import UsageTracker
@@ -324,11 +323,47 @@ def test_expired_file_is_deceived(
 # -- Authentication gates the whole workflow -------------------------------
 
 
-def test_failed_authentication_never_reaches_the_file(auth_controller):
-    auth_controller.register_password_account("owner-1", "correct-horse-battery")
+def test_failed_authentication_never_reaches_the_file(
+    app, auth_controller, authenticated_session, metadata_repository, protection_keys, key_wrapper, device,
+    source_file, tracker,
+):
+    # Phase 20: a wrong password no longer raises — `auth_controller`
+    # returns a decoy session instead. This proves the deeper guarantee
+    # the old exception-based test only implied: a decoy session's
+    # `force_deception` flag stops `SecureAccessService` before it ever
+    # touches the real, already-written file.
+    write_service = SecureStorageService()
+    result = _store(
+        write_service, source_file, device, key_wrapper, authenticated_session, metadata_repository,
+        protection_keys=protection_keys,
+    )
+    file_id, encrypted_bytes = write_service.read_encrypted_file_bytes(result.destination)
 
-    with pytest.raises(InvalidCredentialsError):
-        auth_controller.authenticate_password("owner-1", "wrong-password")
+    decoy_session = auth_controller.authenticate_password("owner-1", "wrong-password")
+    assert decoy_session.is_decoy is True
+
+    viewer = SecureViewerWidget()
+    collector = _Collector(viewer)
+    try:
+        outcome = _access_service(metadata_repository, tracker).attempt_access(
+            file_id,
+            encrypted_bytes,
+            key_wrapper,
+            result.protection_keys,
+            collector,
+            current_device=device,
+            current_usb_identifier=compute_usb_identifier(device),
+            current_machine_fingerprint=compute_machine_fingerprint(),
+            user=decoy_session.owner_id,
+            force_deception=decoy_session.is_decoy,
+        )
+    finally:
+        viewer.close()
+
+    assert outcome.granted is False
+    assert outcome.deception is not None
+    assert collector.calls == []  # the real file content is never reached
+    assert viewer._text_view.toPlainText() == ""  # nothing real was ever rendered
 
 
 # -- Metadata + USB Storage: both persisted copies agree -------------------

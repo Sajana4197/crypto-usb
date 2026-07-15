@@ -17,6 +17,8 @@ from typing import Optional
 
 from core.logger import get_logger
 from crypto.secure_cleanup import CleanupReason, cleanup
+from deception.deception_engine import DeceptionEngine
+from deception.triggers import DeceptionTrigger
 from security import password_hasher
 from security.account_repository import AccountRepository
 from security.exceptions import (
@@ -41,10 +43,12 @@ class AuthController:
         repository: AccountRepository,
         lockout_policy: Optional[LockoutPolicy] = None,
         key_authenticator: Optional[KeyAuthenticator] = None,
+        deception_engine: Optional[DeceptionEngine] = None,
     ) -> None:
         self._repository = repository
         self._lockout_policy = lockout_policy or LockoutPolicy()
         self._key_authenticator = key_authenticator or KeyAuthenticator()
+        self._deception_engine = deception_engine or DeceptionEngine()
 
     def has_account(self, owner_id: str) -> bool:
         return self._repository.exists(owner_id)
@@ -107,8 +111,12 @@ class AuthController:
 
     def authenticate_password(self, owner_id: str, password: str) -> AuthSession:
         """Validate `password` against the stored account. Raises
-        `AccountNotFoundError`, `AccountLockedError`, or
-        `InvalidCredentialsError` — only ever returns a session on success.
+        `AccountNotFoundError` or `AccountLockedError`. Wrong credentials
+        against an existing, unlocked account never raise — matching the
+        proposal's Deceptive Protection Mechanism, this activates the
+        Deception Engine and returns a decoy `AuthSession` (`is_decoy=True`)
+        instead, so a wrong password looks like a successful sign-in.
+        Lockout tracking (`_fail`) still runs exactly as before.
         """
         account = self._require_unlocked_account(owner_id, AuthMethod.PASSWORD)
 
@@ -117,12 +125,22 @@ class AuthController:
             return self._succeed(account)
 
         self._fail(account, "password")
-        raise InvalidCredentialsError("Incorrect password")
+        self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS)
+        return AuthSession(
+            owner_id=owner_id,
+            method=AuthMethod.PASSWORD,
+            authenticated_at=datetime.now(timezone.utc),
+            is_decoy=True,
+        )
 
     def authenticate_private_key(self, owner_id: str, private_key_pem: bytes, passphrase: bytes) -> AuthSession:
         """Validate possession of the enrolled private key via challenge/response.
-        Raises `AccountNotFoundError`, `AccountLockedError`, or
-        `InvalidCredentialsError` — only ever returns a session on success.
+        Raises `AccountNotFoundError` or `AccountLockedError`. Wrong
+        credentials against an existing, unlocked account never raise —
+        matching the proposal's Deceptive Protection Mechanism, this
+        activates the Deception Engine and returns a decoy `AuthSession`
+        (`is_decoy=True`) instead, so a wrong key looks like a successful
+        sign-in. Lockout tracking (`_fail`) still runs exactly as before.
         """
         account = self._require_unlocked_account(owner_id, AuthMethod.PRIVATE_KEY)
 
@@ -135,7 +153,13 @@ class AuthController:
             return self._succeed(account)
 
         self._fail(account, "private key")
-        raise InvalidCredentialsError("Private key authentication failed")
+        self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS)
+        return AuthSession(
+            owner_id=owner_id,
+            method=AuthMethod.PRIVATE_KEY,
+            authenticated_at=datetime.now(timezone.utc),
+            is_decoy=True,
+        )
 
     # -- Password change & recovery ------------------------------------------
 

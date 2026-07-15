@@ -173,7 +173,11 @@ def test_login_success(controller):
     assert dialog.result() == QDialog.DialogCode.Accepted
 
 
-def test_login_wrong_password_shows_attempts_remaining(controller):
+def test_login_wrong_password_returns_decoy_session_and_closes_dialog(controller):
+    # Phase 20: a wrong password against an existing, unlocked account no
+    # longer raises or shows an error — it activates the Deception Engine
+    # and the dialog closes exactly as it would for a real success, so a
+    # wrong-credentials attempt is indistinguishable from a genuine one.
     _app()
     controller.register_password_account("owner-1", "correct-password")
 
@@ -181,8 +185,9 @@ def test_login_wrong_password_shows_attempts_remaining(controller):
     dialog._login_password_edit.setText("wrong-password")
     dialog._on_login_clicked()
 
-    assert dialog.session is None
-    assert "remaining" in dialog._error_label.text().lower()
+    assert dialog.session is not None
+    assert dialog.session.is_decoy is True
+    assert dialog.result() == QDialog.DialogCode.Accepted
 
 
 def test_login_locked_account_shows_lockout_message(controller):

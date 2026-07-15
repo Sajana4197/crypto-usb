@@ -7,7 +7,6 @@ from PySide6.QtWidgets import QApplication
 
 from security.account_repository import AccountRepository
 from security.auth_controller import AuthController
-from security.exceptions import InvalidCredentialsError
 from security.lockout_policy import MAX_FAILED_ATTEMPTS
 from ui.pages.security_page import SecurityPage
 
@@ -64,8 +63,8 @@ def test_page_shows_unlocked_account(app, account_repository, auth_controller):
 def test_page_shows_locked_account_after_max_failed_attempts(app, account_repository, auth_controller):
     auth_controller.register_password_account("owner-1", "correct-horse-battery")
     for _ in range(MAX_FAILED_ATTEMPTS):
-        with pytest.raises(InvalidCredentialsError):
-            auth_controller.authenticate_password("owner-1", "wrong-password")
+        session = auth_controller.authenticate_password("owner-1", "wrong-password")
+        assert session.is_decoy is True
 
     page = _make_page(app, account_repository)
 

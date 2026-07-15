@@ -2,7 +2,7 @@
 
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -364,6 +364,71 @@ def test_mapping_falls_back_to_integrity_failure_for_unrecognized_failure():
     report = ValidationReport(file_id="f")
     report.ok = False  # a failure with no matching named check at all
     assert _map_validation_failure_to_trigger(report) is DeceptionTrigger.INTEGRITY_FAILURE
+
+
+# -- force_deception short-circuits before any real work happens ----------
+
+
+def test_force_deception_returns_denied_outcome_with_deception(service, wrapper, keys):
+    outcome = service.attempt_access(
+        "file-1", b"whatever-bytes", wrapper, keys, _Collector(), force_deception=True
+    )
+
+    assert outcome.granted is False
+    assert outcome.deception is not None
+    assert outcome.deception.trigger is DeceptionTrigger.WRONG_CREDENTIALS
+
+
+def test_force_deception_never_calls_on_granted(service, wrapper, keys):
+    on_granted = _Collector()
+
+    service.attempt_access("file-1", b"whatever-bytes", wrapper, keys, on_granted, force_deception=True)
+
+    assert on_granted.calls == []
+
+
+def test_force_deception_does_not_touch_metadata_or_validation(
+    controller, container, container_bytes, service, wrapper, keys, repository
+):
+    # A real, valid record exists — proving force_deception short-circuits
+    # before ValidationEngine runs, not merely that validation happens to
+    # fail for this input.
+    _create(controller, container, container_bytes)
+
+    with patch("usb.secure_access_service.ValidationEngine") as mock_engine_cls:
+        outcome = service.attempt_access(
+            "file-1", container_bytes, wrapper, keys, _Collector(), force_deception=True
+        )
+
+    mock_engine_cls.assert_not_called()
+    assert outcome.granted is False
+    assert outcome.deception.trigger is DeceptionTrigger.WRONG_CREDENTIALS
+    # The real record is untouched: access_count was never incremented.
+    reopened = MetadataProtector(keys).unprotect(repository.load("file-1"))
+    assert reopened.access_count == 0
+
+
+def test_force_deception_does_not_start_a_usage_tracker_session(
+    controller, container, container_bytes, wrapper, keys, repository
+):
+    _create(controller, container, container_bytes)
+    tracker = MagicMock()
+    service = SecureAccessService(repository, usage_tracker=tracker)
+
+    service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector(), force_deception=True)
+
+    tracker.start_session.assert_not_called()
+
+
+def test_force_deception_does_not_run_cleanup_paths_that_imply_real_access(
+    controller, container, container_bytes, service, wrapper, keys
+):
+    _create(controller, container, container_bytes)
+
+    with patch("usb.secure_access_service.cleanup") as mock_cleanup:
+        service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector(), force_deception=True)
+
+    mock_cleanup.assert_not_called()
 
 
 # -- Secure cleanup runs after both granted and denied outcomes -----------

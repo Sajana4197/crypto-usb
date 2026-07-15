@@ -26,7 +26,7 @@ from metadata.repository import MetadataRepository
 from security.account_repository import AccountRepository
 from security.auth_controller import AuthController
 from security.auth_session import AuthSession, SessionManager
-from security.exceptions import AccountLockedError, InvalidCredentialsError
+from security.exceptions import AccountLockedError
 from security.lockout_policy import MAX_FAILED_ATTEMPTS
 from security.models import AuthMethod
 from tracking.repository import TrackingRepository
@@ -210,10 +210,10 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
     assert third_outcome.granted is False
     assert third_outcome.deception is not None
 
-    # -- 8. Repeated wrong passwords lock the account --------------------
+    # -- 8. Repeated wrong passwords are deceived, then lock the account --
     for _ in range(MAX_FAILED_ATTEMPTS):
-        with pytest.raises(InvalidCredentialsError):
-            auth_controller.authenticate_password("owner-1", "wrong-password")
+        decoy_session = auth_controller.authenticate_password("owner-1", "wrong-password")
+        assert decoy_session.is_decoy is True
     with pytest.raises(AccountLockedError):
         auth_controller.authenticate_password("owner-1", "correct-horse-battery-staple")
 
