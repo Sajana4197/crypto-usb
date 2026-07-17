@@ -149,16 +149,21 @@ class MainWindow(QMainWindow):
         `AccountRepository` and `DeceptionEventRepository` the read-only
         Access Security / Deception Module dashboards need (Phase 16).
         Returns all-`None` when no `db_manager` was supplied (e.g. a test
-        constructing a bare `MainWindow`) — every page tolerates that by
-        falling back to its own standalone, non-persisted defaults.
+        constructing a bare `MainWindow`), or when there is no vault key
+        available (no session, or a decoy session — see
+        `security.auth_session.AuthSession.vault_key`) — every page
+        tolerates that by falling back to its own standalone,
+        non-persisted defaults.
         """
-        if self.db_manager is None:
+        current_session = self.session_manager.current if self.session_manager else None
+        vault_key = current_session.vault_key if current_session else None
+        if self.db_manager is None or vault_key is None:
             return None, None, None, None, None
 
         metadata_repository = MetadataRepository(self.db_manager.connect())
-        protection_keys = load_or_create_metadata_protection_keys(self.db_manager)
+        protection_keys = load_or_create_metadata_protection_keys(self.db_manager, vault_key)
         tracking_repository = TrackingRepository(self.db_manager.connect())
-        tracking_keys = load_or_create_tracking_protection_keys(self.db_manager)
+        tracking_keys = load_or_create_tracking_protection_keys(self.db_manager, vault_key)
         usage_tracker = UsageTracker(tracking_keys, tracking_repository)
         account_repository = AccountRepository(self.db_manager.connect())
         deception_event_repository = DeceptionEventRepository(self.db_manager.connect())

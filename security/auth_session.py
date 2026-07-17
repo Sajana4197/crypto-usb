@@ -29,6 +29,11 @@ class AuthSession:
     authenticated_at: datetime
     session_token: str = field(default_factory=lambda: uuid.uuid4().hex)
     is_decoy: bool = False
+    # The key that wraps this installation's metadata/tracking protection
+    # keys (see `app.protection_keys`), derived from the authenticated
+    # credential. Always `None` for a decoy session (`is_decoy=True`) —
+    # a wrong credential must never be able to unwrap real protection keys.
+    vault_key: Optional[bytes] = None
 
 
 class SessionManager:

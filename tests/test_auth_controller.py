@@ -247,6 +247,88 @@ def test_private_key_account_has_no_recovery_code_hash(controller, rsa_keypair_f
     assert account.recovery_code_hash is None
 
 
+# -- Vault key derivation on authentication ----------------------------------
+
+
+def test_authenticate_password_success_populates_vault_key(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    session = controller.authenticate_password("owner-1", "correct-password")
+
+    assert session.vault_key is not None
+    assert len(session.vault_key) == 32
+
+
+def test_authenticate_password_wrong_password_decoy_has_no_vault_key(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    session = controller.authenticate_password("owner-1", "wrong-password")
+
+    assert session.is_decoy is True
+    assert session.vault_key is None
+
+
+def test_authenticate_password_vault_key_is_deterministic_per_credential(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    first = controller.authenticate_password("owner-1", "correct-password")
+    second = controller.authenticate_password("owner-1", "correct-password")
+
+    assert first.vault_key == second.vault_key
+
+
+def test_authenticate_password_self_heals_missing_key_wrap_salt(controller):
+    controller.register_password_account("owner-1", "correct-password")
+    account = controller.get_account("owner-1")
+    account.credential.key_wrap_salt = None
+    controller._repository.save(account)
+
+    session = controller.authenticate_password("owner-1", "correct-password")
+
+    assert session.vault_key is not None
+    healed_account = controller.get_account("owner-1")
+    assert healed_account.credential.key_wrap_salt is not None
+
+
+def test_authenticate_private_key_success_populates_vault_key(controller, rsa_keypair_fixture):
+    public_pem = rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
+    private_pem = rsa_keypair.serialize_private_key(rsa_keypair_fixture.private_key, PASSPHRASE)
+    controller.register_private_key_account("owner-1", public_pem)
+
+    session = controller.authenticate_private_key("owner-1", private_pem, PASSPHRASE)
+
+    assert session.vault_key is not None
+    assert len(session.vault_key) == 32
+
+
+def test_authenticate_private_key_wrong_key_decoy_has_no_vault_key(
+    controller, rsa_keypair_fixture, other_rsa_keypair_fixture
+):
+    public_pem = rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
+    wrong_private_pem = rsa_keypair.serialize_private_key(other_rsa_keypair_fixture.private_key, PASSPHRASE)
+    controller.register_private_key_account("owner-1", public_pem)
+
+    session = controller.authenticate_private_key("owner-1", wrong_private_pem, PASSPHRASE)
+
+    assert session.is_decoy is True
+    assert session.vault_key is None
+
+
+def test_authenticate_private_key_self_heals_missing_key_wrap_salt(controller, rsa_keypair_fixture):
+    public_pem = rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
+    private_pem = rsa_keypair.serialize_private_key(rsa_keypair_fixture.private_key, PASSPHRASE)
+    controller.register_private_key_account("owner-1", public_pem)
+    account = controller.get_account("owner-1")
+    account.credential.key_wrap_salt = None
+    controller._repository.save(account)
+
+    session = controller.authenticate_private_key("owner-1", private_pem, PASSPHRASE)
+
+    assert session.vault_key is not None
+    healed_account = controller.get_account("owner-1")
+    assert healed_account.credential.key_wrap_salt is not None
+
+
 # -- Change password ---------------------------------------------------------
 
 

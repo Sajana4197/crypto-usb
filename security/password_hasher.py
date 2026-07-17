@@ -46,7 +46,16 @@ def hash_password(password: str) -> PasswordCredential:
     validate_password_strength(password)
     salt = os.urandom(SALT_LEN_BYTES)
     digest = _derive(password, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, KEY_LEN_BYTES)
-    return PasswordCredential(salt=salt, digest=digest, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, key_len=KEY_LEN_BYTES)
+    key_wrap_salt = os.urandom(SALT_LEN_BYTES)
+    return PasswordCredential(
+        salt=salt,
+        digest=digest,
+        n=SCRYPT_N,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+        key_len=KEY_LEN_BYTES,
+        key_wrap_salt=key_wrap_salt,
+    )
 
 
 def verify_password(password: str, credential: PasswordCredential) -> bool:
@@ -58,6 +67,26 @@ def verify_password(password: str, credential: PasswordCredential) -> bool:
 def _derive(password: str, salt: bytes, n: int, r: int, p: int, key_len: int) -> bytes:
     kdf = Scrypt(salt=salt, length=key_len, n=n, r=r, p=p)
     return kdf.derive(password.encode("utf-8"))
+
+
+def derive_vault_key(password: str, salt: bytes) -> bytes:
+    """Derive the vault key that wraps the app's metadata/tracking
+    protection keys, from `password` and its dedicated `key_wrap_salt` —
+    same scrypt cost parameters as `hash_password`, but a separate salt so
+    the vault key is cryptographically independent from the stored
+    password-verification digest.
+    """
+    return _derive(password, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, KEY_LEN_BYTES)
+
+
+def derive_vault_key_from_bytes(secret: bytes, salt: bytes) -> bytes:
+    """Derive the vault key for private-key accounts, from `secret` (e.g.
+    the private key PEM plus passphrase) and its dedicated `key_wrap_salt`.
+    Same scrypt cost parameters as `derive_vault_key`, but takes bytes
+    directly since private key material is not a UTF-8 string.
+    """
+    kdf = Scrypt(salt=salt, length=KEY_LEN_BYTES, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P)
+    return kdf.derive(secret)
 
 
 def generate_recovery_code() -> str:

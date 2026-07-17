@@ -33,6 +33,13 @@ class PasswordCredential:
     r: int
     p: int
     key_len: int
+    # Independent salt for deriving the vault key (see
+    # `security.password_hasher.derive_vault_key`) that wraps the app's
+    # metadata/tracking protection keys. Kept separate from `salt` so the
+    # vault key is cryptographically independent from the password
+    # verification digest. `None` for accounts persisted before this was
+    # introduced; `security.auth_controller` self-heals it on first login.
+    key_wrap_salt: Optional[bytes] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,10 +49,14 @@ class PasswordCredential:
             "r": self.r,
             "p": self.p,
             "key_len": self.key_len,
+            "key_wrap_salt": (
+                base64.b64encode(self.key_wrap_salt).decode("ascii") if self.key_wrap_salt is not None else None
+            ),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PasswordCredential":
+        key_wrap_salt = data.get("key_wrap_salt")
         return cls(
             salt=base64.b64decode(data["salt"]),
             digest=base64.b64decode(data["digest"]),
@@ -53,6 +64,7 @@ class PasswordCredential:
             r=data["r"],
             p=data["p"],
             key_len=data["key_len"],
+            key_wrap_salt=base64.b64decode(key_wrap_salt) if key_wrap_salt is not None else None,
         )
 
 
@@ -61,13 +73,25 @@ class PrivateKeyCredential:
     """The enrolled public key for challenge-response private-key authentication."""
 
     public_key_pem: bytes
+    # See `PasswordCredential.key_wrap_salt` — same purpose, derived from
+    # the private key PEM + passphrase instead of a password.
+    key_wrap_salt: Optional[bytes] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"public_key_pem": base64.b64encode(self.public_key_pem).decode("ascii")}
+        return {
+            "public_key_pem": base64.b64encode(self.public_key_pem).decode("ascii"),
+            "key_wrap_salt": (
+                base64.b64encode(self.key_wrap_salt).decode("ascii") if self.key_wrap_salt is not None else None
+            ),
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PrivateKeyCredential":
-        return cls(public_key_pem=base64.b64decode(data["public_key_pem"]))
+        key_wrap_salt = data.get("key_wrap_salt")
+        return cls(
+            public_key_pem=base64.b64decode(data["public_key_pem"]),
+            key_wrap_salt=base64.b64decode(key_wrap_salt) if key_wrap_salt is not None else None,
+        )
 
 
 Credential = Union[PasswordCredential, PrivateKeyCredential]

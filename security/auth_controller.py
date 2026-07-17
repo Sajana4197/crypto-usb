@@ -12,6 +12,7 @@ not decrypt or touch files itself.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -122,7 +123,13 @@ class AuthController:
 
         assert isinstance(account.credential, PasswordCredential)
         if password_hasher.verify_password(password, account.credential):
-            return self._succeed(account)
+            if account.credential.key_wrap_salt is None:
+                # Self-heal: account was created before vault-key wrapping
+                # existed. Generate the missing salt once, on first login.
+                account.credential.key_wrap_salt = os.urandom(password_hasher.SALT_LEN_BYTES)
+                self._repository.save(account)
+            vault_key = password_hasher.derive_vault_key(password, account.credential.key_wrap_salt)
+            return self._succeed(account, vault_key=vault_key)
 
         self._fail(account, "password")
         self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS)
@@ -150,7 +157,15 @@ class AuthController:
             private_key_pem, passphrase, account.credential.public_key_pem, challenge
         )
         if verified:
-            return self._succeed(account)
+            if account.credential.key_wrap_salt is None:
+                # Self-heal: account was created before vault-key wrapping
+                # existed. Generate the missing salt once, on first login.
+                account.credential.key_wrap_salt = os.urandom(password_hasher.SALT_LEN_BYTES)
+                self._repository.save(account)
+            vault_key = password_hasher.derive_vault_key_from_bytes(
+                private_key_pem + b"|" + passphrase, account.credential.key_wrap_salt
+            )
+            return self._succeed(account, vault_key=vault_key)
 
         self._fail(account, "private key")
         self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS)
@@ -244,7 +259,7 @@ class AuthController:
 
         return account
 
-    def _succeed(self, account: UserAccount) -> AuthSession:
+    def _succeed(self, account: UserAccount, vault_key: Optional[bytes] = None) -> AuthSession:
         self._lockout_policy.register_success(account)
         self._repository.save(account)
         logger.info("Authentication succeeded for owner_id=%s method=%s", account.owner_id, account.auth_method.value)
@@ -252,6 +267,7 @@ class AuthController:
             owner_id=account.owner_id,
             method=account.auth_method,
             authenticated_at=datetime.now(timezone.utc),
+            vault_key=vault_key,
         )
 
     def _fail(self, account: UserAccount, attempted_with: str) -> None:

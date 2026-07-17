@@ -1,9 +1,13 @@
 """Smoke test: the application must construct and launch without error."""
 
+from datetime import datetime, timezone
+
 from PySide6.QtWidgets import QApplication
 
 from app.config import ConfigManager
 from database.db_manager import DatabaseManager
+from security.auth_session import AuthSession, SessionManager
+from security.models import AuthMethod
 from ui.main_window import MainWindow
 from ui.navigation.navigation_panel import DEFAULT_NAV_ITEMS
 from ui.theme.theme_manager import ThemeManager
@@ -45,6 +49,78 @@ def test_all_pages_are_reachable(tmp_path, monkeypatch):
             window._navigate_to(item.page_id)
             app.processEvents()
             assert window.stack.currentWidget() is window._pages[item.page_id]
+    finally:
+        window.close()
+        db_manager.close()
+
+
+def test_build_shared_services_all_none_without_session_manager(tmp_path, monkeypatch):
+    app, window, db_manager = _build_window(tmp_path, monkeypatch)
+    try:
+        assert window.session_manager is None
+        services = window._build_shared_services()
+        assert services == (None, None, None, None, None)
+    finally:
+        window.close()
+        db_manager.close()
+
+
+def test_build_shared_services_all_none_for_decoy_session(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.get_config_path", lambda: tmp_path / "config.json")
+    monkeypatch.setattr("database.db_manager.get_database_path", lambda: tmp_path / "db.sqlite")
+
+    app = QApplication.instance() or QApplication([])
+    config_manager = ConfigManager()
+    db_manager = DatabaseManager()
+    db_manager.initialize()
+    theme_manager = ThemeManager(app, theme=config_manager.config.theme)
+    theme_manager.apply()
+
+    session_manager = SessionManager()
+    session_manager.set(
+        AuthSession(
+            owner_id="owner-1",
+            method=AuthMethod.PASSWORD,
+            authenticated_at=datetime.now(timezone.utc),
+            is_decoy=True,
+        )
+    )
+
+    window = MainWindow(config_manager, theme_manager, db_manager=db_manager, session_manager=session_manager)
+    try:
+        assert session_manager.current.vault_key is None
+        services = window._build_shared_services()
+        assert services == (None, None, None, None, None)
+    finally:
+        window.close()
+        db_manager.close()
+
+
+def test_build_shared_services_populated_with_real_vault_key(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.get_config_path", lambda: tmp_path / "config.json")
+    monkeypatch.setattr("database.db_manager.get_database_path", lambda: tmp_path / "db.sqlite")
+
+    app = QApplication.instance() or QApplication([])
+    config_manager = ConfigManager()
+    db_manager = DatabaseManager()
+    db_manager.initialize()
+    theme_manager = ThemeManager(app, theme=config_manager.config.theme)
+    theme_manager.apply()
+
+    session_manager = SessionManager()
+    session_manager.set(
+        AuthSession(
+            owner_id="owner-1",
+            method=AuthMethod.PASSWORD,
+            authenticated_at=datetime.now(timezone.utc),
+            vault_key=b"\x11" * 32,
+        )
+    )
+
+    window = MainWindow(config_manager, theme_manager, db_manager=db_manager, session_manager=session_manager)
+    try:
+        services = window._build_shared_services()
+        assert all(service is not None for service in services)
     finally:
         window.close()
         db_manager.close()
