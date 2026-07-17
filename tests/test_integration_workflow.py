@@ -179,6 +179,10 @@ def test_full_pipeline_write_then_authenticated_view(
             current_machine_fingerprint=compute_machine_fingerprint(),
             user=authenticated_session.owner_id,
         )
+        # The usage session is only sealed when the viewer actually closes
+        # (Phase 22) — wire it exactly as `ui.pages.decryption_page` does.
+        if outcome.on_view_closed is not None:
+            viewer.closed.connect(outcome.on_view_closed)
 
         assert outcome.granted is True
         assert outcome.deception is None
@@ -216,6 +220,8 @@ def test_one_time_access_is_unusable_after_its_single_view(
             current_machine_fingerprint=compute_machine_fingerprint(), user=authenticated_session.owner_id,
         )
         assert first.granted is True
+        if first.on_view_closed is not None:
+            viewer.closed.connect(first.on_view_closed)
 
         # Second attempt: same on-device container, rotated protection keys
         # from the burn — this is the only legitimate way a real caller
@@ -225,6 +231,8 @@ def test_one_time_access_is_unusable_after_its_single_view(
             current_device=device, current_usb_identifier=compute_usb_identifier(device),
             current_machine_fingerprint=compute_machine_fingerprint(), user=authenticated_session.owner_id,
         )
+        if second.on_view_closed is not None:
+            viewer.closed.connect(second.on_view_closed)
     finally:
         viewer.close()
 
@@ -257,6 +265,8 @@ def test_device_mismatch_triggers_deception_not_a_revealing_error(
             current_device=None, current_usb_identifier=None, current_machine_fingerprint=None,
             user=authenticated_session.owner_id,
         )
+        if outcome.on_view_closed is not None:
+            viewer.closed.connect(outcome.on_view_closed)
     finally:
         viewer.close()
 
@@ -286,6 +296,8 @@ def test_wrong_key_wrapper_is_deceived_not_raised(
             current_device=device, current_usb_identifier=compute_usb_identifier(device),
             current_machine_fingerprint=compute_machine_fingerprint(), user=authenticated_session.owner_id,
         )
+        if outcome.on_view_closed is not None:
+            viewer.closed.connect(outcome.on_view_closed)
     finally:
         viewer.close()
 
@@ -313,6 +325,8 @@ def test_expired_file_is_deceived(
             current_device=device, current_usb_identifier=compute_usb_identifier(device),
             current_machine_fingerprint=compute_machine_fingerprint(), user=authenticated_session.owner_id,
         )
+        if outcome.on_view_closed is not None:
+            viewer.closed.connect(outcome.on_view_closed)
     finally:
         viewer.close()
 

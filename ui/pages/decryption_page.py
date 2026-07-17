@@ -412,6 +412,29 @@ class DecryptionPage(BasePage):
                 outcome.deception.trigger.value,
             )
 
+        # A local flag, not a widget attribute: `_on_capture_detected` and
+        # `_on_viewer_closed` are both connected to signals the viewer
+        # fires, and their relative firing order is not guaranteed, so
+        # the flag is what lets the close handler show the right message
+        # regardless of which one runs first.
+        capture_state = {"detected": False}
+
+        def _on_capture_detected() -> None:
+            capture_state["detected"] = True
+            if outcome.on_screen_capture_detected is not None:
+                outcome.on_screen_capture_detected()
+
+        def _on_viewer_closed() -> None:
+            if capture_state["detected"]:
+                self._show_status("Secure viewer closed: a screen capture attempt was detected.", ok=False)
+            else:
+                self._show_status("Secure viewer closed.")
+
+        viewer.set_screen_capture_handler(_on_capture_detected)
+        if outcome.on_view_closed is not None:
+            viewer.closed.connect(outcome.on_view_closed)
+        viewer.closed.connect(_on_viewer_closed)
+
         viewer.show()
         self._show_status(f"Opened {self._selected_container.name} in the secure viewer.")
 

@@ -35,9 +35,9 @@ Scope of protection:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QContextMenuEvent,
@@ -145,9 +145,20 @@ class SecureViewerWidget(QWidget):
     and `close()`. Renders TXT, images, and PDF entirely from in-memory
     bytes; nothing here ever reads or writes a file."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    # Emitted exactly once, at the end of `_teardown()`, regardless of
+    # whether the window was closed by the user or by capture detection —
+    # the signal callers (see `ui.pages.decryption_page`) rely on to know
+    # when the user has actually finished viewing.
+    closed = Signal()
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        on_screen_capture_detected: Optional[Callable[[], None]] = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Secure Viewer")
+        self._on_screen_capture_detected = on_screen_capture_detected
 
         self._text_view = _SecureTextView()
         self._label_view = _SecureLabelView()
@@ -253,6 +264,12 @@ class SecureViewerWidget(QWidget):
     def is_closed(self) -> bool:
         return self._closed
 
+    def set_screen_capture_handler(self, handler: Optional[Callable[[], None]]) -> None:
+        """Set (or clear) the callback invoked when a screen-capture
+        attempt is detected while this viewer is open — see
+        `usb.secure_access_service.AccessOutcome.on_screen_capture_detected`."""
+        self._on_screen_capture_detected = handler
+
     def _teardown(self) -> None:
         """Clear rendered content and stop background watchers. Idempotent."""
         if self._closed:
@@ -272,8 +289,24 @@ class SecureViewerWidget(QWidget):
             self._capture_protection = None
 
         logger.info("Secure viewer closed; decrypted content cleared from view")
+        self.closed.emit()
 
     def _on_printscreen_detected(self) -> None:
         # Detection only — see viewer.screen_capture_protection for why
-        # this cannot also guarantee prevention.
+        # this cannot also guarantee prevention. Per project decision, the
+        # viewer reacts by closing immediately rather than merely logging:
+        # the capture event is recorded first (before teardown clears the
+        # record reference), then any lingering rendered content is
+        # blanked right away, then the window closes (which runs the same
+        # blanking again via `_teardown`, but that moment is not
+        # guaranteed to be instantaneous, so this avoids a visible lag).
         logger.warning("Print Screen detected while the secure viewer was open")
+        if self._on_screen_capture_detected is not None:
+            self._on_screen_capture_detected()
+        self._text_view.clear()
+        self._label_view.clear()
+        self._pdf_document.close()
+        if self._pdf_buffer is not None:
+            self._pdf_buffer.close()
+            self._pdf_buffer = None
+        self.close()

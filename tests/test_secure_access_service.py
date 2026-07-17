@@ -76,6 +76,11 @@ def service(repository):
     return SecureAccessService(repository)
 
 
+@pytest.fixture
+def tracker():
+    return MagicMock()
+
+
 class _Collector:
     """An `on_granted` callback that records what it was handed."""
 
@@ -470,3 +475,88 @@ def test_decrypt_failure_after_validation_pass_runs_secure_cleanup(
 
     assert outcome.granted is False
     mock_cleanup.assert_called_once_with(CleanupReason.VALIDATION_FAILURE)
+
+
+# -- record_close only fires via the returned callback (Phase 22) ---------
+
+
+def test_no_usage_tracker_means_no_view_closed_or_capture_callbacks(
+    controller, container, container_bytes, service, wrapper, keys
+):
+    _create(controller, container, container_bytes)
+
+    outcome = service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector())
+
+    assert outcome.on_view_closed is None
+    assert outcome.on_screen_capture_detected is None
+
+
+def test_force_deception_outcome_has_no_view_closed_or_capture_callbacks(service, wrapper, keys):
+    outcome = service.attempt_access(
+        "file-1", b"whatever-bytes", wrapper, keys, _Collector(), force_deception=True
+    )
+
+    assert outcome.on_view_closed is None
+    assert outcome.on_screen_capture_detected is None
+
+
+def test_validation_failure_populates_callbacks_without_closing_synchronously(
+    controller, container, container_bytes, wrapper, keys, repository, tracker
+):
+    _create(controller, container, container_bytes)
+    service = SecureAccessService(repository, usage_tracker=tracker)
+
+    outcome = service.attempt_access("file-1", b"corrupted-container-bytes", wrapper, keys, _Collector())
+
+    assert outcome.granted is False
+    assert outcome.on_view_closed is not None
+    assert outcome.on_screen_capture_detected is not None
+    tracker.record_close.assert_not_called()
+    tracker.record_screen_capture_attempt.assert_not_called()
+
+    outcome.on_view_closed()
+    tracker.record_close.assert_called_once_with(tracker.start_session.return_value)
+
+    outcome.on_screen_capture_detected()
+    tracker.record_screen_capture_attempt.assert_called_once_with(tracker.start_session.return_value)
+
+
+def test_decrypt_failure_populates_callbacks_without_closing_synchronously(
+    controller, container, container_bytes, wrapper, keys, repository, tracker
+):
+    _create(controller, container, container_bytes, usage_policy=UsagePolicy(one_time_access=True))
+    service = SecureAccessService(repository, usage_tracker=tracker)
+    first = service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector())
+    assert first.granted is True
+    tracker.record_close.reset_mock()
+
+    outcome = service.attempt_access("file-1", container_bytes, wrapper, first.protection_keys, _Collector())
+
+    assert outcome.granted is False
+    assert outcome.on_view_closed is not None
+    assert outcome.on_screen_capture_detected is not None
+    tracker.record_close.assert_not_called()
+
+    outcome.on_view_closed()
+    tracker.record_close.assert_called_once_with(tracker.start_session.return_value)
+
+
+def test_successful_access_populates_callbacks_without_closing_synchronously(
+    controller, container, container_bytes, wrapper, keys, repository, tracker
+):
+    _create(controller, container, container_bytes)
+    service = SecureAccessService(repository, usage_tracker=tracker)
+
+    outcome = service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector())
+
+    assert outcome.granted is True
+    assert outcome.on_view_closed is not None
+    assert outcome.on_screen_capture_detected is not None
+    tracker.record_close.assert_not_called()
+    tracker.record_screen_capture_attempt.assert_not_called()
+
+    outcome.on_view_closed()
+    tracker.record_close.assert_called_once_with(tracker.start_session.return_value)
+
+    outcome.on_screen_capture_detected()
+    tracker.record_screen_capture_attempt.assert_called_once_with(tracker.start_session.return_value)

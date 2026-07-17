@@ -45,6 +45,7 @@ full lifecycle in view from start to finish.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable, Optional
 
 from core.logger import get_logger
@@ -111,12 +112,24 @@ class AccessOutcome:
     `granted` is True and reflects whatever the caller must use for any
     future read of this file's metadata: unchanged for a reusable file,
     freshly rotated for a one-time-access file that was just burned.
+
+    `on_view_closed` and `on_screen_capture_detected` are set whenever a
+    usage-tracking session was started for this attempt (i.e. a
+    `usage_tracker` was configured and this wasn't a `force_deception`
+    short-circuit) — closing over the session's `UsageRecord` so the
+    caller can seal it (`on_view_closed`) at the moment the user
+    actually finishes viewing, and record a capture attempt
+    (`on_screen_capture_detected`) at the moment one is detected,
+    instead of this service guessing when either happens. Both are
+    `None` when no usage tracker is configured.
     """
 
     granted: bool
     file_id: str
     deception: Optional[DeceptionResponse] = None
     protection_keys: Optional[MetadataProtectionKeys] = None
+    on_view_closed: Optional[Callable[[], None]] = None
+    on_screen_capture_detected: Optional[Callable[[], None]] = None
 
 
 class SecureAccessService:
@@ -206,11 +219,20 @@ class SecureAccessService:
             logger.warning(
                 "Access denied for file_id=%s (trigger=%s); deception activated", file_id, trigger.value
             )
+            on_view_closed = None
+            on_screen_capture_detected = None
             if record is not None:
                 self._usage_tracker.record_validation_result(record, False)
-                self._usage_tracker.record_close(record)
+                on_view_closed = partial(self._usage_tracker.record_close, record)
+                on_screen_capture_detected = partial(self._usage_tracker.record_screen_capture_attempt, record)
             cleanup(CleanupReason.VALIDATION_FAILURE)
-            return AccessOutcome(granted=False, file_id=file_id, deception=deception)
+            return AccessOutcome(
+                granted=False,
+                file_id=file_id,
+                deception=deception,
+                on_view_closed=on_view_closed,
+                on_screen_capture_detected=on_screen_capture_detected,
+            )
 
         if record is not None:
             self._usage_tracker.record_validation_result(record, True)
@@ -241,18 +263,36 @@ class SecureAccessService:
                 "(one-time access already consumed, or invalid key material); deception activated",
                 file_id,
             )
+            on_view_closed = None
+            on_screen_capture_detected = None
             if record is not None:
-                self._usage_tracker.record_close(record)
+                on_view_closed = partial(self._usage_tracker.record_close, record)
+                on_screen_capture_detected = partial(self._usage_tracker.record_screen_capture_attempt, record)
             cleanup(CleanupReason.VALIDATION_FAILURE)
-            return AccessOutcome(granted=False, file_id=file_id, deception=deception)
+            return AccessOutcome(
+                granted=False,
+                file_id=file_id,
+                deception=deception,
+                on_view_closed=on_view_closed,
+                on_screen_capture_detected=on_screen_capture_detected,
+            )
 
         new_keys = protection_keys
         if metadata.usage_policy.one_time_access:
             new_keys = self._enforcer.burn(metadata, key_wrapper, protection_keys)
 
+        on_view_closed = None
+        on_screen_capture_detected = None
         if record is not None:
-            self._usage_tracker.record_close(record)
+            on_view_closed = partial(self._usage_tracker.record_close, record)
+            on_screen_capture_detected = partial(self._usage_tracker.record_screen_capture_attempt, record)
 
         logger.info("Access granted and viewing completed for file_id=%s", file_id)
         cleanup(CleanupReason.SUCCESSFUL_VIEW)
-        return AccessOutcome(granted=True, file_id=file_id, protection_keys=new_keys)
+        return AccessOutcome(
+            granted=True,
+            file_id=file_id,
+            protection_keys=new_keys,
+            on_view_closed=on_view_closed,
+            on_screen_capture_detected=on_screen_capture_detected,
+        )

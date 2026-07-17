@@ -181,6 +181,10 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
     second_outcome = access_service.attempt_access(
         file_id, encrypted_bytes, key_wrapper, result.protection_keys, _capture, user=session.owner_id
     )
+    # No viewer widget is involved for this direct service call — seal the
+    # usage session the same way `viewer.closed` would (Phase 22).
+    if second_outcome.on_view_closed is not None:
+        second_outcome.on_view_closed()
     assert second_outcome.granted is False
     assert second_outcome.deception is not None
     # Either trigger is a correct "you cannot access this again" outcome:
@@ -207,6 +211,8 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
         current_machine_fingerprint=None,
         user=session.owner_id,
     )
+    if third_outcome.on_view_closed is not None:
+        third_outcome.on_view_closed()
     assert third_outcome.granted is False
     assert third_outcome.deception is not None
 

@@ -321,6 +321,109 @@ def test_capture_protection_level_defaults_to_none_before_show(widget):
     assert widget.capture_protection_level is CaptureProtectionLevel.NONE
 
 
+# -- `closed` signal ------------------------------------------------------
+
+
+def test_closed_signal_fires_exactly_once_on_close(widget):
+    calls = []
+    widget.closed.connect(lambda: calls.append(None))
+
+    widget.close()
+    widget.close()  # idempotent teardown must not fire the signal again
+
+    assert len(calls) == 1
+
+
+def test_closed_signal_fires_on_printscreen_triggered_close(widget):
+    calls = []
+    widget.closed.connect(lambda: calls.append(None))
+
+    widget._on_printscreen_detected()
+
+    assert len(calls) == 1
+    assert widget.is_closed is True
+
+
+# -- Screen-capture detection reacts by closing immediately ----------------
+
+
+def test_set_screen_capture_handler_stores_the_handler(widget):
+    handler = lambda: None  # noqa: E731
+    widget.set_screen_capture_handler(handler)
+
+    assert widget._on_screen_capture_detected is handler
+
+
+def test_printscreen_detected_calls_the_configured_handler(widget):
+    calls = []
+    widget.set_screen_capture_handler(lambda: calls.append("detected"))
+
+    widget._on_printscreen_detected()
+
+    assert calls == ["detected"]
+
+
+def test_printscreen_detected_without_a_handler_does_not_raise(widget):
+    widget._on_printscreen_detected()  # must not raise
+
+    assert widget.is_closed is True
+
+
+def test_printscreen_detected_blanks_text_content(widget):
+    widget.display(TEXT_CONTENT, CONTENT_TYPE_TXT)
+
+    widget._on_printscreen_detected()
+
+    assert widget._text_view.toPlainText() == ""
+
+
+def test_printscreen_detected_blanks_image_content(widget, app):
+    widget.display(generate_fake_image(random.Random(1)), "image/png")
+
+    widget._on_printscreen_detected()
+
+    assert widget._label_view.pixmap() is None or widget._label_view.pixmap().isNull()
+
+
+def test_printscreen_detected_blanks_pdf_content(widget, app):
+    widget.display(generate_fake_pdf(random.Random(1)), CONTENT_TYPE_PDF)
+    app.processEvents()
+    assert widget._pdf_document.pageCount() == 1
+
+    widget._on_printscreen_detected()
+
+    assert widget._pdf_document.pageCount() == 0
+
+
+def test_printscreen_detected_closes_the_viewer(widget):
+    assert widget.is_closed is False
+
+    widget._on_printscreen_detected()
+
+    assert widget.is_closed is True
+
+
+def test_printscreen_detected_calls_handler_before_teardown_clears_content(widget):
+    """The tracking callback must see the widget still "open" (i.e. it
+    must run before `close()`/`_teardown()`), so a caller closing over a
+    live UsageRecord can still record the event before anything is torn
+    down."""
+    order = []
+    widget.set_screen_capture_handler(lambda: order.append("handler"))
+    original_close = widget.close
+
+    def _spy_close():
+        order.append("close")
+        original_close()
+
+    widget.close = _spy_close
+    widget.display(TEXT_CONTENT, CONTENT_TYPE_TXT)
+
+    widget._on_printscreen_detected()
+
+    assert order == ["handler", "close"]
+
+
 # -- Integration with Phase 9's SecureViewSession -------------------------
 
 

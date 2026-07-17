@@ -144,6 +144,12 @@ def test_device_page_writes_and_decryption_page_reads_it_back(tmp_path, device_p
     assert decryption_page._active_viewer is not None
     assert decryption_page._active_viewer._text_view.toPlainText() == plaintext
 
+    # The usage session is only sealed when the viewer is actually closed
+    # (Phase 22) — not when decryption finished, which already happened
+    # above with the viewer still open.
+    assert tracker.read_all_records() == []
+    decryption_page._active_viewer.close()
+
     records = tracker.read_all_records()
     assert len(records) == 1
     assert records[0].user == "owner-1"
@@ -272,6 +278,86 @@ def test_view_click_does_not_force_deception_for_a_real_session(
     finally:
         if decryption_page._active_viewer is not None and not decryption_page._active_viewer.is_closed:
             decryption_page._active_viewer.close()
+
+
+# -- Viewer close / screen-capture wiring (Phase 22) ------------------------
+
+
+def test_viewer_closed_signal_is_wired_to_outcome_on_view_closed(tmp_path, decryption_page):
+    mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path, granted=True)
+    mock_outcome.on_view_closed = MagicMock()
+    mock_outcome.on_screen_capture_detected = MagicMock()
+
+    with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+        mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+        decryption_page._on_view_clicked()
+
+    viewer = decryption_page._active_viewer
+    mock_outcome.on_view_closed.assert_not_called()
+
+    viewer.close()
+
+    mock_outcome.on_view_closed.assert_called_once_with()
+
+
+def test_screen_capture_handler_is_wired_to_outcome_on_screen_capture_detected(tmp_path, decryption_page):
+    mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path, granted=True)
+    mock_outcome.on_view_closed = MagicMock()
+    mock_outcome.on_screen_capture_detected = MagicMock()
+
+    with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+        mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+        decryption_page._on_view_clicked()
+
+    viewer = decryption_page._active_viewer
+    viewer._on_printscreen_detected()
+
+    mock_outcome.on_screen_capture_detected.assert_called_once_with()
+    assert viewer.is_closed is True
+
+
+def test_viewer_closed_by_capture_detection_shows_capture_status_message(tmp_path, decryption_page):
+    mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path, granted=True)
+    mock_outcome.on_view_closed = MagicMock()
+    mock_outcome.on_screen_capture_detected = MagicMock()
+
+    with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+        mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+        decryption_page._on_view_clicked()
+
+    decryption_page._active_viewer._on_printscreen_detected()
+
+    assert "screen capture attempt was detected" in decryption_page.status_label.text().lower()
+
+
+def test_viewer_closed_normally_shows_plain_closed_status_message(tmp_path, decryption_page):
+    mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path, granted=True)
+    mock_outcome.on_view_closed = MagicMock()
+    mock_outcome.on_screen_capture_detected = MagicMock()
+
+    with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+        mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+        decryption_page._on_view_clicked()
+
+    decryption_page._active_viewer.close()
+
+    assert decryption_page.status_label.text() == "Secure viewer closed."
+
+
+def test_no_view_closed_wiring_when_outcome_has_none(tmp_path, decryption_page):
+    """When no usage tracker session exists, `on_view_closed` is `None` —
+    closing the viewer must not raise from trying to call it."""
+    mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path, granted=True)
+    mock_outcome.on_view_closed = None
+    mock_outcome.on_screen_capture_detected = None
+
+    with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+        mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+        decryption_page._on_view_clicked()
+
+    decryption_page._active_viewer.close()  # must not raise
+
+    assert decryption_page.status_label.text() == "Secure viewer closed."
 
 
 # -- Deception events are recorded through the page's own engine -----------
