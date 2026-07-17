@@ -1,7 +1,7 @@
 """Decryption page: the read side of the Secure Storage Layer.
 
-Mirrors `ui.pages.device_page.DevicePage`'s completeness on the write
-side: detects a USB device, lists the `.cusc` secure containers on it,
+Mirrors `ui.pages.encryption_page.EncryptionPage`'s completeness on the
+write side: detects a USB device, lists the `.cusc` secure containers on it,
 loads the file-wrapping private key the user exported when the file
 was written, and hands everything to
 `usb.secure_access_service.SecureAccessService` — which runs every
@@ -18,6 +18,13 @@ purpose is to be indistinguishable from a genuine denial-free view, so
 this page never brands one outcome as "denied" and the other as
 "granted" anywhere the user (or an attacker) can see. Only the log
 (`core.logger`) ever records which one actually happened.
+
+The device table refreshes itself automatically on a timer (as well as
+via the "Refresh Devices" button) so a device plugged in or removed
+while this page is open shows up without the user having to ask for
+it. A refresh is a no-op — it never rebuilds the table or disturbs the
+current selection — whenever the detected device set hasn't actually
+changed since the last check.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -69,6 +76,11 @@ _FAIL_COLOR = QColor("#e5484d")
 
 _DEVICE_COLUMN_TITLES = ("Mount", "Label", "Filesystem", "Free Space", "Removable")
 _CONTAINER_GLOB = "*.cusc"
+
+# How often the device table polls for plugged-in/removed devices without
+# any user action. Frequent enough to feel "automatic" during a demo,
+# infrequent enough that the background psutil calls are never noticeable.
+_DEVICE_POLL_INTERVAL_MS = 2000
 
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -148,6 +160,11 @@ class DecryptionPage(BasePage):
         self.add_widget(self._build_status_label())
 
         self._refresh_devices()
+
+        self._device_poll_timer = QTimer(self)
+        self._device_poll_timer.setInterval(_DEVICE_POLL_INTERVAL_MS)
+        self._device_poll_timer.timeout.connect(self._refresh_devices)
+        self._device_poll_timer.start()
 
     # -- UI construction -------------------------------------------------
 
@@ -260,7 +277,15 @@ class DecryptionPage(BasePage):
     # -- Device & container listing ---------------------------------------
 
     def _refresh_devices(self) -> None:
-        self._devices = self._detector.detect_devices()
+        devices = self._detector.detect_devices()
+        if devices == self._devices:
+            # Nothing actually changed (same devices, same free space) —
+            # skip the rebuild so a background poll never disturbs the
+            # current selection or scroll position.
+            return
+
+        previously_selected_id = self._selected_device.device_id if self._selected_device else None
+        self._devices = devices
         self.table.setRowCount(0)
         for device in self._devices:
             self._append_device_row(device)
@@ -269,7 +294,26 @@ class DecryptionPage(BasePage):
             "No removable devices detected" if count == 0 else f"{count} device(s) detected"
         )
         self._selected_device = None
-        self._refresh_containers()
+        self._reselect_device(previously_selected_id)
+        if self._selected_device is None:
+            # No previous selection to restore, or the previously selected
+            # device is no longer present — `_reselect_device` only
+            # refreshes containers (via `_on_device_selected`) when it
+            # actually finds and reselects a row, so the container table
+            # needs an explicit refresh here to reflect "nothing selected".
+            self._refresh_containers()
+
+    def _reselect_device(self, device_id: Optional[str]) -> None:
+        """Restore the previous selection after a rebuild, if that device
+        is still present — e.g. a different device was plugged in or
+        removed elsewhere on the system, but the one the user had
+        selected here is unaffected."""
+        if device_id is None:
+            return
+        for row, device in enumerate(self._devices):
+            if device.device_id == device_id:
+                self.table.selectRow(row)
+                return
 
     def _append_device_row(self, device: USBDevice) -> None:
         row = self.table.rowCount()
@@ -297,9 +341,18 @@ class DecryptionPage(BasePage):
         self._refresh_containers()
 
     def _refresh_containers(self) -> None:
-        self._containers = []
+        containers = []
         if self._selected_device is not None:
-            self._containers = sorted(Path(self._selected_device.mount_point).glob(_CONTAINER_GLOB))
+            containers = sorted(Path(self._selected_device.mount_point).glob(_CONTAINER_GLOB))
+
+        if containers == self._containers:
+            # Nothing actually changed — skip the rebuild so a background
+            # poll (see the module docstring) never disturbs the file the
+            # user currently has selected in this table.
+            return
+
+        previously_selected_path = self._selected_container
+        self._containers = containers
 
         self.container_table.setRowCount(0)
         for path in self._containers:
@@ -311,6 +364,12 @@ class DecryptionPage(BasePage):
 
         self._selected_container = None
         self._update_view_button_state()
+
+        if previously_selected_path is not None:
+            for row, path in enumerate(self._containers):
+                if path == previously_selected_path:
+                    self.container_table.selectRow(row)
+                    break
 
     def _on_container_selected(self) -> None:
         rows = {index.row() for index in self.container_table.selectedIndexes()}
@@ -363,12 +422,24 @@ class DecryptionPage(BasePage):
             self._show_status("No metadata repository is available in this session.", ok=False)
             return
 
+        # Snapshotted into locals rather than re-read from `self.` further
+        # down: `progress_dialog` below pumps the Qt event loop (to keep
+        # the UI responsive during validation/decryption), which gives the
+        # background device-poll timer (see the module docstring) a
+        # chance to run and rebuild the device/container tables out from
+        # under an in-progress view. `USBDevice`/`Path` are both safe to
+        # hold a reference to regardless of what `self._selected_device`/
+        # `self._selected_container` become in the meantime.
+        selected_container = self._selected_container
+        selected_device = self._selected_device
+        key_wrapper = self._key_wrapper
         owner_id = self._session_manager.current.owner_id
+        is_decoy = self._session_manager.current.is_decoy
         try:
-            file_id, encrypted_bytes = self._storage_service.read_encrypted_file_bytes(self._selected_container)
+            file_id, encrypted_bytes = self._storage_service.read_encrypted_file_bytes(selected_container)
         except (USBError, OSError) as exc:
-            logger.error("Failed to read secure container %s: %s", self._selected_container, exc)
-            self._show_status(f"Could not read {self._selected_container.name}: {exc}", ok=False)
+            logger.error("Failed to read secure container %s: %s", selected_container, exc)
+            self._show_status(f"Could not read {selected_container.name}: {exc}", ok=False)
             return
 
         access_service = SecureAccessService(
@@ -376,7 +447,7 @@ class DecryptionPage(BasePage):
         )
 
         viewer = SecureViewerWidget()
-        viewer.setWindowTitle(self._selected_container.name)
+        viewer.setWindowTitle(selected_container.name)
         # Keep a strong Python reference for as long as the window is open —
         # a parentless top-level `QWidget` has nothing else keeping its
         # Python wrapper alive once this method returns.
@@ -390,16 +461,16 @@ class DecryptionPage(BasePage):
             outcome = access_service.attempt_access(
                 file_id,
                 encrypted_bytes,
-                self._key_wrapper,
+                key_wrapper,
                 self._protection_keys,
                 _on_granted,
-                current_device=self._selected_device,
+                current_device=selected_device,
                 current_usb_identifier=(
-                    compute_usb_identifier(self._selected_device) if self._selected_device else None
+                    compute_usb_identifier(selected_device) if selected_device else None
                 ),
                 current_machine_fingerprint=compute_machine_fingerprint(),
                 user=owner_id,
-                force_deception=self._session_manager.current.is_decoy,
+                force_deception=is_decoy,
             )
 
         if not outcome.granted:
@@ -436,7 +507,7 @@ class DecryptionPage(BasePage):
         viewer.closed.connect(_on_viewer_closed)
 
         viewer.show()
-        self._show_status(f"Opened {self._selected_container.name} in the secure viewer.")
+        self._show_status(f"Opened {selected_container.name} in the secure viewer.")
 
     # -- Status ------------------------------------------------------------
 

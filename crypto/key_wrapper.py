@@ -47,7 +47,7 @@ class RSAOAEPKeyWrapper(KeyWrapper):
     def private_key(self) -> RSAPrivateKey | None:
         """The private key this wrapper unwraps with, if any — exposed so a
         caller that generated this wrapper's keypair (e.g.
-        `ui.pages.device_page.DevicePage`) can later export it for the
+        `ui.pages.encryption_page.EncryptionPage`) can later export it for the
         user to keep, without reaching into a private attribute."""
         return self._private_key
 

@@ -34,7 +34,7 @@ from tracking.tamper_evident_log import generate_tracking_keys
 from tracking.tracking_service import UsageTracker
 from ui.main_window import MainWindow
 from ui.pages.decryption_page import DecryptionPage
-from ui.pages.device_page import DevicePage
+from ui.pages.encryption_page import EncryptionPage
 from usb.device_detector import USBDevice
 from app.config import ConfigManager
 from ui.theme.theme_manager import ThemeManager
@@ -96,7 +96,7 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
     session_manager = SessionManager()
     session_manager.set(session)
 
-    device_page = DevicePage(
+    encryption_page = EncryptionPage(
         metadata_repository=metadata_repository, protection_keys=protection_keys, session_manager=session_manager
     )
     decryption_page = DecryptionPage(
@@ -114,16 +114,16 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
     device_dir.mkdir()
     device = _device(str(device_dir))
 
-    device_page._devices = [device]
-    device_page._populate_table()
-    device_page.table.selectRow(0)
-    device_page._source_path = source
-    device_page._update_write_button_state()
+    encryption_page._devices = [device]
+    encryption_page._populate_table()
+    encryption_page.table.selectRow(0)
+    encryption_page._source_path = source
+    encryption_page._update_write_button_state()
     # Mark the freshly-generated FEK's file as one-time access before the
     # write happens, by driving the lower-level service directly with the
-    # same key wrapper DevicePage will keep using for the rest of the demo.
-    key_wrapper = device_page._get_key_wrapper()
-    result = device_page._service.store_file(
+    # same key wrapper EncryptionPage will keep using for the rest of the demo.
+    key_wrapper = encryption_page._get_key_wrapper()
+    result = encryption_page._service.store_file(
         source_path=source,
         device=device,
         key_wrapper=key_wrapper,
@@ -142,7 +142,7 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
     with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), patch.object(
         QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
     ):
-        device_page._on_export_key_clicked()
+        encryption_page._on_export_key_clicked()
     assert exported_key_path.exists()
 
     # -- 4. Wrong passphrase is rejected, no crash -----------------------
@@ -176,7 +176,7 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
 
     from usb.secure_access_service import SecureAccessService
 
-    file_id, encrypted_bytes = device_page._service.read_encrypted_file_bytes(written)
+    file_id, encrypted_bytes = encryption_page._service.read_encrypted_file_bytes(written)
     access_service = SecureAccessService(metadata_repository, usage_tracker=tracker)
     second_outcome = access_service.attempt_access(
         file_id, encrypted_bytes, key_wrapper, result.protection_keys, _capture, user=session.owner_id

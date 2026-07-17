@@ -1,4 +1,4 @@
-"""Integration test: `DevicePage` writes a secure container and exports
+"""Integration test: `EncryptionPage` writes a secure container and exports
 its file-wrapping private key exactly as a user would; `DecryptionPage`
 reads the same container back through the real service layer, sharing
 the same `MetadataRepository` / `MetadataProtectionKeys` /
@@ -24,7 +24,7 @@ from tracking.repository import TrackingRepository
 from tracking.tamper_evident_log import generate_tracking_keys
 from tracking.tracking_service import UsageTracker
 from ui.pages.decryption_page import DecryptionPage
-from ui.pages.device_page import DevicePage
+from ui.pages.encryption_page import EncryptionPage
 from usb.device_detector import USBDevice
 
 
@@ -77,8 +77,8 @@ def tracker(db_connection):
 
 
 @pytest.fixture
-def device_page(app, metadata_repository, protection_keys, session_manager):
-    return DevicePage(
+def encryption_page(app, metadata_repository, protection_keys, session_manager):
+    return EncryptionPage(
         metadata_repository=metadata_repository, protection_keys=protection_keys, session_manager=session_manager
     )
 
@@ -96,7 +96,7 @@ def decryption_page(app, metadata_repository, protection_keys, session_manager, 
         page._active_viewer.close()
 
 
-def test_device_page_writes_and_decryption_page_reads_it_back(tmp_path, device_page, decryption_page, tracker):
+def test_encryption_page_writes_and_decryption_page_reads_it_back(tmp_path, encryption_page, decryption_page, tracker):
     source = tmp_path / "findings.txt"
     plaintext = "the quarterly figures are confidential"
     source.write_text(plaintext, encoding="utf-8")
@@ -104,23 +104,23 @@ def test_device_page_writes_and_decryption_page_reads_it_back(tmp_path, device_p
     device_dir.mkdir()
     device = _device(str(device_dir))
 
-    # -- Write via DevicePage, exactly as a user driving the UI would. --
-    device_page._devices = [device]
-    device_page._populate_table()
-    device_page.table.selectRow(0)
-    device_page._source_path = source
-    device_page._update_write_button_state()
-    device_page._on_write_clicked()
+    # -- Write via EncryptionPage, exactly as a user driving the UI would. --
+    encryption_page._devices = [device]
+    encryption_page._populate_table()
+    encryption_page.table.selectRow(0)
+    encryption_page._source_path = source
+    encryption_page._update_write_button_state()
+    encryption_page._on_write_clicked()
 
     written = list(device_dir.glob("*.cusc"))
     assert len(written) == 1
-    assert "verified" in device_page.status_label.text().lower()
+    assert "verified" in encryption_page.status_label.text().lower()
 
     exported_key_path = tmp_path / "key.pem"
     with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), patch.object(
         QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
     ):
-        device_page._on_export_key_clicked()
+        encryption_page._on_export_key_clicked()
     assert exported_key_path.exists()
 
     # -- Read it back via DecryptionPage. --
@@ -381,22 +381,22 @@ def test_denied_attempt_through_the_page_is_recorded_in_the_shared_event_reposit
     device_dir.mkdir()
     device = _device(str(device_dir))
 
-    device_page_helper = DevicePage(
+    encryption_page_helper = EncryptionPage(
         metadata_repository=metadata_repository, protection_keys=protection_keys, session_manager=session_manager
     )
-    device_page_helper._devices = [device]
-    device_page_helper._populate_table()
-    device_page_helper.table.selectRow(0)
-    device_page_helper._source_path = source
-    device_page_helper._update_write_button_state()
-    device_page_helper._on_write_clicked()
+    encryption_page_helper._devices = [device]
+    encryption_page_helper._populate_table()
+    encryption_page_helper.table.selectRow(0)
+    encryption_page_helper._source_path = source
+    encryption_page_helper._update_write_button_state()
+    encryption_page_helper._on_write_clicked()
     written = list(device_dir.glob("*.cusc"))[0]
 
     exported_key_path = tmp_path / "key.pem"
     with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), patch.object(
         QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
     ):
-        device_page_helper._on_export_key_clicked()
+        encryption_page_helper._on_export_key_clicked()
 
     page.key_path_label.setText(str(exported_key_path))
     page.passphrase_edit.setText("a-strong-passphrase")
@@ -416,3 +416,73 @@ def test_denied_attempt_through_the_page_is_recorded_in_the_shared_event_reposit
     finally:
         if page._active_viewer is not None and not page._active_viewer.is_closed:
             page._active_viewer.close()
+
+
+# -- Automatic device-list polling ------------------------------------------
+
+
+class _StubDetector:
+    def __init__(self, devices):
+        self._devices = devices
+
+    def detect_devices(self):
+        return self._devices
+
+
+def test_device_poll_timer_is_running_after_construction(app):
+    page = DecryptionPage()
+
+    assert page._device_poll_timer.isActive() is True
+
+
+def test_refresh_devices_is_a_noop_when_device_list_is_unchanged(app, tmp_path, monkeypatch):
+    page = DecryptionPage()
+    device = _device(str(tmp_path))
+    page._detector = _StubDetector([device])
+    page._refresh_devices()
+
+    rebuild_calls = []
+    monkeypatch.setattr(page, "_append_device_row", lambda device: rebuild_calls.append(device))
+
+    page._refresh_devices()  # same detector, same device list
+
+    assert rebuild_calls == []
+
+
+def test_refresh_devices_preserves_selection_when_a_new_device_appears(app, tmp_path):
+    page = DecryptionPage()
+    device_a_dir = tmp_path / "a"
+    device_a_dir.mkdir()
+    device_a = _device(str(device_a_dir))
+    page._detector = _StubDetector([device_a])
+    page._refresh_devices()
+    page.table.selectRow(0)
+    assert page._selected_device is not None
+
+    device_b_dir = tmp_path / "b"
+    device_b_dir.mkdir()
+    device_b = _device(str(device_b_dir))
+    page._detector = _StubDetector([device_a, device_b])
+
+    page._refresh_devices()
+
+    assert page.table.rowCount() == 2
+    assert page._selected_device is not None
+    assert page._selected_device.device_id == device_a.device_id
+
+
+def test_refresh_devices_clears_selection_when_selected_device_disappears(app, tmp_path):
+    page = DecryptionPage()
+    device_dir = tmp_path / "a"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    page._detector = _StubDetector([device])
+    page._refresh_devices()
+    page.table.selectRow(0)
+    assert page._selected_device is not None
+
+    page._detector = _StubDetector([])
+
+    page._refresh_devices()
+
+    assert page._selected_device is None

@@ -2,7 +2,7 @@
 
 Also the composition root that hands every page the shared, persisted
 dependencies the integrated workflow needs to connect the write side
-(`DevicePage`) to the read side (`DecryptionPage`) — the same
+(`EncryptionPage`) to the read side (`DecryptionPage`) — the same
 `MetadataRepository`/`MetadataProtectionKeys` (so a file written by one
 page can actually be validated and read back by the other) and the
 same `UsageTracker` (so both sides append to one tamper-evident log).
@@ -97,7 +97,11 @@ class MainWindow(QMainWindow):
                 deception_event_repository=deception_event_repository,
                 usage_tracker=usage_tracker,
             ),
-            "encryption": EncryptionPage(),
+            "encryption": EncryptionPage(
+                metadata_repository=metadata_repository,
+                protection_keys=protection_keys,
+                session_manager=self.session_manager,
+            ),
             "decryption": DecryptionPage(
                 metadata_repository=metadata_repository,
                 protection_keys=protection_keys,
@@ -105,11 +109,7 @@ class MainWindow(QMainWindow):
                 usage_tracker=usage_tracker,
                 deception_event_repository=deception_event_repository,
             ),
-            "devices": DevicePage(
-                metadata_repository=metadata_repository,
-                protection_keys=protection_keys,
-                session_manager=self.session_manager,
-            ),
+            "devices": DevicePage(),
             "metadata": MetadataPage(metadata_repository=metadata_repository, protection_keys=protection_keys),
             "security": SecurityPage(account_repository=account_repository),
             "deception": DeceptionPage(event_repository=deception_event_repository),

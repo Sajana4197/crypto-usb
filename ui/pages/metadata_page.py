@@ -1,10 +1,10 @@
 """Metadata page: a read-only view over stored file metadata records.
 
 Reads directly from the same `metadata.repository.MetadataRepository`
-`ui.pages.device_page.DevicePage` writes to and
+`ui.pages.encryption_page.EncryptionPage` writes to and
 `ui.pages.decryption_page.DecryptionPage` validates against — no new
 write path, and no new persistence: every record shown here already
-exists because a file was written through the normal Device Validation
+exists because a file was written through the normal Encrypt File
 flow.
 """
 
