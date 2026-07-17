@@ -14,6 +14,8 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_dynamic_libs
+
 block_cipher = None
 
 REPO_ROOT = Path(SPECPATH).resolve().parent
@@ -21,7 +23,13 @@ REPO_ROOT = Path(SPECPATH).resolve().parent
 a = Analysis(
     [str(REPO_ROOT / "main.py")],
     pathex=[str(REPO_ROOT)],
-    binaries=[],
+    # `sqlcipher3._sqlite3` (imported by `sqlcipher3.dbapi2`, which
+    # `database.db_manager` imports directly — Phase 23) is a compiled
+    # extension module PyInstaller's static analysis does find on its
+    # own, but `collect_dynamic_libs` is added defensively in case the
+    # wheel's build ever links against a separate OpenSSL/SQLCipher DLL
+    # instead of a single statically-linked .pyd.
+    binaries=collect_dynamic_libs("sqlcipher3"),
     datas=[
         (str(REPO_ROOT / "resources"), "resources"),
     ],
@@ -33,6 +41,10 @@ a = Analysis(
         "win32api",
         "win32file",
         "winreg",
+        # Belt-and-braces alongside `database.db_manager`'s direct
+        # `import sqlcipher3.dbapi2 as sqlcipher` — see the `binaries=`
+        # comment above.
+        "sqlcipher3.dbapi2",
     ],
     # `pyinstaller_hooks/hook-usb.py` overrides a community hook meant for
     # the third-party PyUSB library — see that file's comment. It must be

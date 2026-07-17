@@ -6,6 +6,12 @@ pywin32>=306; sys_platform == "win32"
 
 pytest>=8.0
 
-# Optional, per architecture spec: encrypted SQLite database.
-# Uncomment if SQLCipher-backed storage is required for a later phase.
-# sqlcipher3-binary>=0.5
+# Encrypted SQLite database (Phase 23), per architecture spec.
+# `sqlcipher3-binary` (the package originally earmarked here) ships only
+# manylinux wheels on PyPI — no Windows build at all — which is a
+# non-starter for this project's Windows-only .exe target. `sqlcipher3`
+# (no `-binary` suffix) is the same upstream project and, as of 0.6,
+# bundles the same statically-linked SQLCipher binary but also publishes
+# win_amd64 wheels; the importable module is still `sqlcipher3.dbapi2`
+# either way.
+sqlcipher3>=0.6

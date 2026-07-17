@@ -72,6 +72,14 @@ def get_database_path() -> Path:
     return get_data_dir() / DATABASE_FILE_NAME
 
 
+def get_vault_key_path() -> Path:
+    """The SQLCipher file-encryption key's on-disk location — a random,
+    locally-generated key (see `database.file_key`), not derived from any
+    user credential. Separate from `data/crypto_usb.db` itself so the key
+    and the encrypted file it unlocks are two distinct pieces of state."""
+    return get_data_dir() / ".vault_key"
+
+
 def get_icon(name: str) -> Path:
     """Resolve an icon file by name inside the icons directory."""
     return get_icons_dir() / name

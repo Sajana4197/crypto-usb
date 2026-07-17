@@ -1,8 +1,20 @@
 """SQLite database initialization and connection management.
 
-Only creates the database file and a minimal `schema_version` /
-`app_meta` bookkeeping table in this phase. The metadata-driven access
-control schema is added in a later phase.
+Creates the database file, bootstraps a minimal `schema_version` /
+`app_meta` bookkeeping table, and — since Phase 23 — opens the file
+through SQLCipher rather than plain `sqlite3`, so the entire file at
+rest (including the `accounts` table `security.account_repository`
+must be able to read *before* login succeeds, which is why it cannot
+use Phase 21's credential-derived vault key) is encrypted under a
+random, locally-generated key (`database.file_key`). This is a
+separate, outer layer from that vault key, not a replacement for it —
+see `database.file_key`'s module docstring.
+
+`sqlcipher3.dbapi2.Connection` is duck-type compatible with every
+`sqlite3.Connection` operation the repositories in this codebase
+actually use (`execute`/`commit`/`cursor`/`row_factory`), so every
+repository module keeps its existing `sqlite3.Connection` type hints
+unchanged — this is the only module that imports `sqlcipher3` directly.
 """
 
 from __future__ import annotations
@@ -10,8 +22,11 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 
+import sqlcipher3.dbapi2 as sqlcipher
+
 from core.constants import SCHEMA_VERSION
 from core.logger import get_logger
+from database.file_key import load_or_create_file_key
 from utils.paths import get_database_path
 
 logger = get_logger(__name__)
@@ -46,8 +61,21 @@ class DatabaseManager:
 
     def connect(self) -> sqlite3.Connection:
         if self._connection is None:
-            self._connection = sqlite3.connect(str(self._path))
-            self._connection.row_factory = sqlite3.Row
+            conn = sqlcipher.connect(str(self._path))
+            conn.execute(f"PRAGMA key = \"x'{load_or_create_file_key().hex()}'\"")
+            try:
+                conn.execute("SELECT count(*) FROM sqlite_master")
+            except Exception as exc:
+                conn.close()
+                raise RuntimeError(
+                    "Failed to unlock the encrypted database — the key file may be "
+                    "missing, corrupted, or the database file predates SQLCipher encryption"
+                ) from exc
+            # `sqlcipher3.dbapi2.Cursor` is its own type, not a `sqlite3.Cursor`
+            # subclass — `sqlite3.Row` rejects it at construction time, so the
+            # row factory must be sqlcipher's own (drop-in-compatible) `Row`.
+            conn.row_factory = sqlcipher.Row
+            self._connection = conn
         return self._connection
 
     @contextmanager
