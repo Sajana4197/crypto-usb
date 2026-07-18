@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
@@ -58,6 +58,19 @@ def _device(mount_point: str, free_bytes: int = 100_000_000) -> USBDevice:
 @pytest.fixture
 def app():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def mock_result_popup(monkeypatch):
+    """`important=True` status calls now pop up a real, blocking
+    `QMessageBox` -- autouse so this demo-script test isn't blocked by
+    one, across every page it drives."""
+    mock = MagicMock()
+    monkeypatch.setattr("ui.pages.encryption_page.show_result_popup", mock)
+    monkeypatch.setattr("ui.pages.decryption_page.show_result_popup", mock)
+    monkeypatch.setattr("ui.pages.settings_page.show_result_popup", mock)
+    monkeypatch.setattr("ui.pages.tracking_page.show_result_popup", mock)
+    return mock
 
 
 @pytest.fixture

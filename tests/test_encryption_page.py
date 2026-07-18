@@ -1,14 +1,26 @@
 """Tests for the Encrypt File UI page (device table, write panel, and the
 containers-already-on-this-device table)."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pytest
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
 
 from ui.pages.encryption_page import EncryptionPage
 from usb.device_detector import USBDevice
-from usb.exceptions import ContainerOverwriteError
+from usb.exceptions import ContainerOverwriteError, USBError
 from usb.secure_storage_service import SecureWriteResult
+
+
+@pytest.fixture(autouse=True)
+def mock_result_popup(monkeypatch):
+    """`important=True` status calls now pop up a real, blocking
+    `QMessageBox` -- autouse so every test in this file is safe by
+    default; tests that specifically assert on popup behavior can still
+    take this fixture as a parameter to inspect the same mock."""
+    mock = MagicMock()
+    monkeypatch.setattr("ui.pages.encryption_page.show_result_popup", mock)
+    return mock
 
 
 def _make_page():
@@ -163,6 +175,55 @@ def test_write_container_end_to_end(tmp_path):
     assert "verified" in page.status_label.text().lower()
 
 
+def test_write_success_pops_up_result(tmp_path, mock_result_popup):
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"top secret contents")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+
+    page._on_write_clicked()
+
+    # The write-success message pops up; deep-verify's own success
+    # message (called right after) is routine and does not.
+    assert mock_result_popup.call_count == 1
+    _, kwargs = mock_result_popup.call_args
+    assert kwargs.get("ok", True) is True
+
+
+def test_write_failure_pops_up_result(tmp_path, monkeypatch, mock_result_popup):
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+
+    def _raise(*args, **kwargs):
+        raise USBError("disk full")
+
+    monkeypatch.setattr(page._service, "store_file", _raise)
+
+    page._on_write_clicked()
+
+    mock_result_popup.assert_called_once()
+    _, kwargs = mock_result_popup.call_args
+    assert kwargs["ok"] is False
+
+
 def test_write_container_overwrite_declined_shows_cancel_message(tmp_path, monkeypatch):
     page = _make_page()
     source = tmp_path / "secret.txt"
@@ -230,6 +291,82 @@ def test_write_container_overwrite_confirmed_retries_write(tmp_path, monkeypatch
     assert "verified" in page.status_label.text().lower()
 
 
+# -- One-time access checkbox (Phase 25) -------------------------------------
+
+
+def _stub_store_file(monkeypatch, page, device_dir, captured):
+    from metadata.protection import generate_protection_keys
+
+    fake_destination = device_dir / "fixed-id.cusc"
+    fake_result = SecureWriteResult(
+        file_id="fixed-id",
+        destination=fake_destination,
+        container_size_bytes=4,
+        protection_keys=generate_protection_keys(),
+    )
+
+    def _store(*args, **kwargs):
+        captured.update(kwargs)
+        fake_destination.write_bytes(b"stub")
+        return fake_result
+
+    monkeypatch.setattr(page._service, "store_file", _store)
+    monkeypatch.setattr(page._service, "verify_stored_file", lambda *a, **kw: True)
+
+
+def test_one_time_access_checkbox_defaults_unchecked():
+    page = _make_page()
+    assert page.one_time_access_checkbox.isChecked() is False
+
+
+def test_write_container_with_checkbox_checked_passes_one_time_access_true(tmp_path, monkeypatch):
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+    page.one_time_access_checkbox.setChecked(True)
+
+    captured = {}
+    _stub_store_file(monkeypatch, page, device_dir, captured)
+
+    page._on_write_clicked()
+
+    assert captured["usage_policy"].one_time_access is True
+    # Resets so the next write in this session defaults back to reusable.
+    assert page.one_time_access_checkbox.isChecked() is False
+
+
+def test_write_container_with_checkbox_unchecked_passes_one_time_access_false(tmp_path, monkeypatch):
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+    assert page.one_time_access_checkbox.isChecked() is False
+
+    captured = {}
+    _stub_store_file(monkeypatch, page, device_dir, captured)
+
+    page._on_write_clicked()
+
+    assert captured["usage_policy"].one_time_access is False
+
+
 # -- Exporting the file-wrapping private key --------------------------------
 
 
@@ -244,6 +381,53 @@ def test_export_key_writes_encrypted_private_key_file(tmp_path):
     assert destination.exists()
     assert b"ENCRYPTED" in destination.read_bytes() or b"PRIVATE KEY" in destination.read_bytes()
     assert "exported" in page.status_label.text().lower()
+
+
+def test_export_key_success_pops_up_result_and_resets_source_file(tmp_path, mock_result_popup):
+    page = _make_page()
+    page._source_path = tmp_path / "secret.txt"
+    page.source_file_label.setText(str(page._source_path))
+    page._update_write_button_state()
+    destination = tmp_path / "exported.pem"
+
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), \
+         patch.object(QFileDialog, "getSaveFileName", return_value=(str(destination), "")):
+        page._on_export_key_clicked()
+
+    mock_result_popup.assert_called_once()
+    _, kwargs = mock_result_popup.call_args
+    assert kwargs.get("ok", True) is True
+
+    # The write "session" ends at export -- a stale source file selection
+    # must not silently carry over to a subsequent write.
+    assert page._source_path is None
+    assert page.source_file_label.text() == "No file selected."
+    assert page.write_button.isEnabled() is False
+
+
+def test_export_key_failure_pops_up_result(tmp_path, mock_result_popup):
+    page = _make_page()
+    destination = tmp_path / "a-directory"
+    destination.mkdir()
+
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), \
+         patch.object(QFileDialog, "getSaveFileName", return_value=(str(destination), "")):
+        page._on_export_key_clicked()
+
+    mock_result_popup.assert_called_once()
+    _, kwargs = mock_result_popup.call_args
+    assert kwargs["ok"] is False
+
+
+def test_export_key_cancelled_passphrase_does_not_pop_up(tmp_path, mock_result_popup):
+    """Routine/validation messages (short passphrase, cancelled dialog)
+    are not a write/export pass-fail outcome -- inline-only."""
+    page = _make_page()
+
+    with patch.object(QInputDialog, "getText", return_value=("short", True)):
+        page._on_export_key_clicked()
+
+    mock_result_popup.assert_not_called()
 
 
 def test_export_key_cancelled_passphrase_dialog_does_nothing(tmp_path):

@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from typing import Iterator, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QProgressDialog, QWidget
+from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog, QWidget
 
 
 @contextmanager
@@ -58,3 +58,17 @@ def progress_dialog(parent: Optional[QWidget], message: str) -> Iterator[QProgre
         yield dialog
     finally:
         dialog.close()
+
+
+def show_result_popup(parent: Optional[QWidget], message: str, ok: bool = True) -> None:
+    """Surface a deliberate action's pass/fail result as a modal popup, in
+    addition to whatever inline status label already shows it — a page
+    taller than the visible window can scroll that label out of view,
+    silently hiding the result. Only for outcomes of a deliberate action
+    (a write, an export, a verification); routine/informational status
+    text should stay inline-only, not call this for every update.
+    """
+    if ok:
+        QMessageBox.information(parent, "Success", message)
+    else:
+        QMessageBox.warning(parent, "Error", message)

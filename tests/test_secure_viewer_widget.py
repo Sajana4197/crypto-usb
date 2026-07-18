@@ -3,8 +3,9 @@
 import random
 
 import pytest
-from PySide6.QtCore import QEvent, QMimeData, Qt
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent, QKeySequence
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QMimeData, Qt
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent, QKeySequence, QPixmap
+from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import QApplication
 
 import viewer.secure_viewer_widget as svw
@@ -15,6 +16,19 @@ from viewer.screen_capture_protection import CaptureProtectionLevel
 from viewer.secure_viewer_widget import CONTENT_TYPE_PDF, CONTENT_TYPE_TXT, SecureViewerWidget
 
 TEXT_CONTENT = b"the quarterly figures are strictly confidential"
+
+
+def _large_png_bytes(width: int, height: int) -> bytes:
+    """A real PNG at an arbitrary size, built via Qt (fast) rather than
+    the pure-Python `generate_fake_image` encoder (too slow at this
+    resolution) -- used to exercise the "large image fits to window
+    instead of opening at native size" zoom behavior."""
+    pixmap = QPixmap(width, height)
+    pixmap.fill(Qt.GlobalColor.red)
+    buffer = QBuffer()
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    pixmap.save(buffer, "PNG")
+    return bytes(buffer.data())
 
 
 @pytest.fixture
@@ -73,6 +87,170 @@ def test_pdf_view_uses_multi_page_mode_so_all_pages_are_reachable(widget):
     from PySide6.QtPdfWidgets import QPdfView
 
     assert widget._pdf_view.pageMode() == QPdfView.PageMode.MultiPage
+
+
+# -- Zoom controls: PDF / image / text -----------------------------------
+
+
+def test_pdf_initial_zoom_mode_is_fit_to_width(widget, app):
+    """Fixes "PDFs open too zoomed in": QPdfView's own default is an
+    unscaled native zoom; displaying a PDF must switch it to
+    FitToWidth rather than leaving Qt's default in place."""
+    pdf = generate_fake_pdf(random.Random(1))
+
+    widget.display(pdf, CONTENT_TYPE_PDF)
+    app.processEvents()
+
+    assert widget._pdf_view.zoomMode() == QPdfView.ZoomMode.FitToWidth
+
+
+def test_pdf_zoom_in_switches_to_custom_mode_and_increases_factor(widget, app):
+    pdf = generate_fake_pdf(random.Random(1))
+    widget.display(pdf, CONTENT_TYPE_PDF)
+    app.processEvents()
+    baseline = widget._pdf_view.zoomFactor()
+
+    widget._zoom_in()
+
+    assert widget._pdf_view.zoomMode() == QPdfView.ZoomMode.Custom
+    assert widget._pdf_view.zoomFactor() > baseline
+
+
+def test_pdf_zoom_out_decreases_factor(widget, app):
+    pdf = generate_fake_pdf(random.Random(1))
+    widget.display(pdf, CONTENT_TYPE_PDF)
+    app.processEvents()
+    widget._zoom_in()
+    zoomed_in_factor = widget._pdf_view.zoomFactor()
+
+    widget._zoom_out()
+
+    assert widget._pdf_view.zoomFactor() < zoomed_in_factor
+
+
+def test_pdf_zoom_fit_returns_to_fit_to_width_after_custom_zoom(widget, app):
+    pdf = generate_fake_pdf(random.Random(1))
+    widget.display(pdf, CONTENT_TYPE_PDF)
+    app.processEvents()
+    widget._zoom_in()
+    assert widget._pdf_view.zoomMode() == QPdfView.ZoomMode.Custom
+
+    widget._zoom_fit()
+
+    assert widget._pdf_view.zoomMode() == QPdfView.ZoomMode.FitToWidth
+
+
+def test_pdf_zoom_factor_is_clamped_to_the_configured_range(widget, app):
+    pdf = generate_fake_pdf(random.Random(1))
+    widget.display(pdf, CONTENT_TYPE_PDF)
+    app.processEvents()
+
+    for _ in range(30):
+        widget._zoom_in()
+    assert widget._pdf_view.zoomFactor() <= svw._ZOOM_MAX
+
+    for _ in range(30):
+        widget._zoom_out()
+    assert widget._pdf_view.zoomFactor() >= svw._ZOOM_MIN
+
+
+def test_large_image_initial_display_is_scaled_to_fit_not_native_size(widget, app):
+    """Fixes "large images open too big to read": a plain QLabel at
+    native pixel size previously showed a high-resolution image far
+    larger than any reasonable window."""
+    large_png = _large_png_bytes(4000, 3000)
+
+    widget.display(large_png, "image/png")
+    app.processEvents()
+
+    assert widget._original_image_pixmap.width() == 4000
+    assert widget._label_view.pixmap().width() < 4000
+    assert widget._image_zoom_factor < 1.0
+
+
+def test_small_image_initial_display_is_not_upscaled(widget, app):
+    small_png = _large_png_bytes(50, 50)
+
+    widget.display(small_png, "image/png")
+    app.processEvents()
+
+    assert widget._label_view.pixmap().width() == 50
+    assert widget._image_zoom_factor == 1.0
+
+
+def test_image_zoom_in_increases_rendered_size(widget, app):
+    large_png = _large_png_bytes(4000, 3000)
+    widget.display(large_png, "image/png")
+    app.processEvents()
+    baseline_width = widget._label_view.pixmap().width()
+
+    widget._zoom_in()
+
+    assert widget._label_view.pixmap().width() > baseline_width
+
+
+def test_image_zoom_out_decreases_rendered_size(widget, app):
+    large_png = _large_png_bytes(4000, 3000)
+    widget.display(large_png, "image/png")
+    app.processEvents()
+    widget._zoom_in()
+    zoomed_in_width = widget._label_view.pixmap().width()
+
+    widget._zoom_out()
+
+    assert widget._label_view.pixmap().width() < zoomed_in_width
+
+
+def test_image_zoom_fit_recomputes_fit_after_manual_zoom(widget, app):
+    large_png = _large_png_bytes(4000, 3000)
+    widget.display(large_png, "image/png")
+    app.processEvents()
+    fit_factor = widget._image_zoom_factor
+    widget._zoom_in()
+    assert widget._image_zoom_factor != fit_factor
+
+    widget._zoom_fit()
+
+    assert widget._image_zoom_factor == pytest.approx(fit_factor)
+
+
+def test_text_zoom_in_increases_font_size(widget):
+    widget.display(TEXT_CONTENT, CONTENT_TYPE_TXT)
+    baseline = widget._text_view.font().pointSizeF()
+
+    widget._zoom_in()
+
+    assert widget._text_view.font().pointSizeF() > baseline
+
+
+def test_text_zoom_out_decreases_font_size(widget):
+    widget.display(TEXT_CONTENT, CONTENT_TYPE_TXT)
+    widget._zoom_in()
+    zoomed_in_size = widget._text_view.font().pointSizeF()
+
+    widget._zoom_out()
+
+    assert widget._text_view.font().pointSizeF() < zoomed_in_size
+
+
+def test_text_zoom_fit_resets_to_the_default_font_size(widget):
+    widget.display(TEXT_CONTENT, CONTENT_TYPE_TXT)
+    default_size = widget._text_view.font().pointSizeF()
+    widget._zoom_in()
+    widget._zoom_in()
+    assert widget._text_view.font().pointSizeF() != default_size
+
+    widget._zoom_fit()
+
+    assert widget._text_view.font().pointSizeF() == pytest.approx(default_size)
+
+
+def test_zoom_buttons_before_any_display_do_not_raise(widget):
+    # No document shown yet -- every branch must no-op gracefully rather
+    # than assume a "current" content type is meaningful.
+    widget._zoom_in()
+    widget._zoom_out()
+    widget._zoom_fit()
 
 
 def test_unsupported_content_type_shows_a_notice_instead_of_raising(widget):

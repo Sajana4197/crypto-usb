@@ -60,7 +60,7 @@ from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
 from tracking.tracking_service import UsageTracker
 from ui.pages.base_page import BasePage
-from ui.widgets.busy import progress_dialog
+from ui.widgets.busy import progress_dialog, show_result_popup
 from usb.device_detector import USBDevice, USBDeviceDetector
 from usb.exceptions import USBError
 from usb.secure_access_service import SecureAccessService
@@ -402,11 +402,11 @@ class DecryptionPage(BasePage):
             private_pem = Path(path_text).read_bytes()
             private_key = rsa_keypair.load_private_key(private_pem, self.passphrase_edit.text().encode("utf-8"))
         except (CryptoError, OSError) as exc:
-            self._show_status(f"Failed to load private key: {exc}", ok=False)
+            self._show_status(f"Failed to load private key: {exc}", ok=False, important=True)
             return
 
         self._key_wrapper = RSAOAEPKeyWrapper(private_key.public_key(), private_key)
-        self._show_status("Private key loaded.")
+        self._show_status("Private key loaded.", important=True)
         self._update_view_button_state()
 
     # -- Viewing --------------------------------------------------------------
@@ -501,6 +501,14 @@ class DecryptionPage(BasePage):
                 self._show_status("Secure viewer closed: a screen capture attempt was detected.", ok=False)
             else:
                 self._show_status("Secure viewer closed.")
+            # The loaded private key was scoped to this viewing session —
+            # require the user to deliberately reload it (and re-confirm
+            # its passphrase) before it can be used to view another file,
+            # even a different container off the same device.
+            self._key_wrapper = None
+            self.key_path_label.setText("No private key loaded.")
+            self.passphrase_edit.clear()
+            self._update_view_button_state()
 
         viewer.set_screen_capture_handler(_on_capture_detected)
         if outcome.on_view_closed is not None:
@@ -512,13 +520,15 @@ class DecryptionPage(BasePage):
 
     # -- Status ------------------------------------------------------------
 
-    def _show_status(self, message: str, ok: bool = True) -> None:
+    def _show_status(self, message: str, ok: bool = True, important: bool = False) -> None:
         self.status_label.setText(message)
         self.status_label.setStyleSheet(f"color: {(_OK_COLOR if ok else _FAIL_COLOR).name()};")
         if ok:
             logger.info(message)
         else:
             logger.warning(message)
+        if important:
+            show_result_popup(self, message, ok=ok)
 
 
 def _fallback_protection_keys() -> MetadataProtectionKeys:

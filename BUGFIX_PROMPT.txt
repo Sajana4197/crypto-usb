@@ -1,22 +1,74 @@
-Fix a bug in the crypto-usb project: the login screen's wrong-credentials deception trigger is never recorded to the audit trail.
+Implement three UI improvements in the crypto-usb project, reported together but independent of each other. Do all three; they don't conflict.
 
-Root cause: app/main.py's bootstrap() function constructs the AuthController used by the real sign-in dialog like this (currently line 53-54):
+===========================================================================
+1. Important status messages should also appear as a popup, not just the inline label
+===========================================================================
 
-    account_repository = AccountRepository(db_manager.connect())
-    auth_controller = AuthController(account_repository)
+Problem: every page shows action results (write success/failure, export results, key-load results, etc.) only via a bottom-of-page status label (each page has its own `_show_status`/`_set_password_status` method that sets `self.status_label`'s text/color). On a page taller than the visible window, or a smaller window, that label can end up out of view with no way to scroll to it, so the user misses the result entirely.
 
-No deception_engine argument is passed. security/auth_controller.py's AuthController.__init__ falls back to "self._deception_engine = deception_engine or DeceptionEngine()" — a bare DeceptionEngine() with no event_repository. A DeceptionEventRepository is never even constructed anywhere in bootstrap() at all; it's only built later, inside ui/main_window.py's MainWindow._build_shared_services(), which runs AFTER the login dialog has already completed. So when authenticate_password/authenticate_private_key call self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS) on a wrong password (Phase 20 behavior), deception/deception_engine.py's DeceptionEngine.activate() reaches "if self._event_repository is not None: self._event_repository.record(...)" and skips it, since self._event_repository is None — the event is only ever logged to the log file, never persisted to the deception_events table. That's why the Dashboard's "Deception Triggers" stat card and the Deception Module page's audit trail never show it, even after a subsequent correct login.
+Scope decision already made: only messages tied to a deliberate action with a real pass/fail outcome should also popup. Routine/informational/live-state text (device counts, "Private key loaded.", live checklists) stays inline-only — do not add a popup for every minor status change, that would be constant interruption.
 
-Fix, in app/main.py's bootstrap():
-1. Import DeceptionEventRepository from deception.event_repository and DeceptionEngine from deception.deception_engine.
-2. Right after "db_manager.initialize()" (and before or alongside constructing account_repository), construct: "deception_event_repository = DeceptionEventRepository(db_manager.connect())". This only needs the raw connection — deception event rows are not credential-wrapped (only the metadata/tracking protection keys are, per Phase 21), so this is safe to build before authentication happens.
-3. Construct "deception_engine = DeceptionEngine(event_repository=deception_event_repository)".
-4. Change the AuthController construction to: "auth_controller = AuthController(account_repository, deception_engine=deception_engine)".
+Implementation approach: add one small shared helper rather than duplicating QMessageBox construction in every file. Add a function to ui/widgets/busy.py (alongside the existing progress_dialog/busy_cursor helpers) — something like:
 
-Do not change anything else in bootstrap() or in AuthController itself — AuthController already accepts an optional deception_engine parameter (added in Phase 20), it was simply never supplied at this call site. Do not touch the second AuthController construction in ui/main_window.py (used for the Settings page's change-password flow) — that one deliberately has no deception behavior (change_password/reset_password_with_recovery_code were excluded from decoy behavior by design in Phase 20), so it's correct as-is and out of scope here.
+    def show_result_popup(parent, message: str, ok: bool = True) -> None:
+        if ok:
+            QMessageBox.information(parent, "Success" if ok else "Error", message)
+        else:
+            QMessageBox.warning(parent, "Error", message)
 
-Testing:
-- Add/update a test around app/main.py's bootstrap() (or wherever it's already covered, e.g. tests/test_integration_workflow.py or tests/test_e2e_demo.py) verifying that a wrong-password login attempt results in a row being recorded via DeceptionEventRepository — i.e. that AuthController is now constructed with a deception_engine wired to a real event_repository, not the default bare DeceptionEngine().
-- Run the full test suite and ruff lint; fix anything broken.
+Then, in each page listed below, extend the existing `_show_status`/`_set_password_status` method with an `important: bool = False` parameter that, when True, also calls `show_result_popup(self, message, ok=ok)` in addition to updating the inline label (do not remove the inline label — keep both). Then pass `important=True` explicitly at these specific call sites (find the current method by name in each file, since exact line numbers may have shifted from recent fixes):
 
-Do not touch any other files. After implementing, run tests and lint, confirm the app launches, then manually verify: log in with a wrong password once, log out, log back in with the correct password, and confirm the Dashboard's "Deception Triggers" stat card and the Deception Module page's audit trail now show that wrong-password attempt. Then stop — do not proceed to any other phase automatically.
+- ui/pages/encryption_page.py: the write-success message in `_write_container` ("Wrote secure container..."), the write-failure message ("Write failed: ..."), the export-key success message in `_on_export_key_clicked` ("Exported encrypted private key to..."), and its failure message ("Failed to export private key: ...").
+- ui/pages/decryption_page.py: the key-load success/failure messages in `_on_load_key_clicked`, and the "Opened ... in the secure viewer" / viewer-closed messages in `_on_view_clicked` (the `_on_viewer_closed` local function).
+- ui/pages/settings_page.py: `_set_password_status`'s change-password success/failure messages.
+- ui/pages/tracking_page.py: the "Verify Log Integrity" result message (pass/fail), not the routine refresh message.
+
+Do not touch ui/dialogs/auth_dialog.py — it's already a small modal dialog with its own inline error/info display, fully visible without scrolling; the popup-on-top-of-a-popup pattern doesn't apply there. Do not touch device summary counts, validation checklists, or any other purely informational/live label anywhere.
+
+===========================================================================
+2. File/key path fields should reset after their one-time action completes
+===========================================================================
+
+Encrypt File (ui/pages/encryption_page.py): once the user exports the key pair, that marks the end of that file's write "session" — the chosen source file should not silently remain selected for a subsequent write. In `_on_export_key_clicked`, right after the existing success path (after the line `self._show_status(f"Exported encrypted private key to {path}...")` and its `logger.info(...)` call), add:
+
+    self._source_path = None
+    self.source_file_label.setText("No file selected.")
+    self._update_write_button_state()
+
+This disables "Write Secure Container" until the user deliberately chooses a new file.
+
+Decrypt & View (ui/pages/decryption_page.py): once the secure viewer is opened and then closed, the loaded private key should not silently remain available for viewing a different file without the user re-confirming it. In `_on_view_clicked`'s `_on_viewer_closed` local function (currently around lines 499-503), add — regardless of whether a capture was detected:
+
+    self._key_wrapper = None
+    self.key_path_label.setText("No private key loaded.")
+    self.passphrase_edit.clear()
+    self._update_view_button_state()
+
+This disables "View Selected File" until the user reloads a private key (choose file + passphrase + Load Key) for the next file, even if they pick a different container off the same device.
+
+===========================================================================
+3. The secure viewer needs zoom controls, and should default to a sane fit instead of opening at native/huge zoom
+===========================================================================
+
+Problem: viewer/secure_viewer_widget.py's PDF and image views currently show content at an unscaled default — PDFs at QPdfView's default zoom, images at the QPixmap's native pixel size via a plain QLabel — with no way to zoom out, so large images or PDFs authored at high resolution can open too large to read comfortably, and there's no control to fix it.
+
+Add a small toolbar (QHBoxLayout, Zoom In / Zoom Out / Fit to Window buttons, plus a label showing the current zoom percentage) to the top of SecureViewerWidget, above the existing QStackedWidget. Wire it to a unified interface with three methods on SecureViewerWidget — `_zoom_in()`, `_zoom_out()`, `_zoom_fit()` — that each dispatch based on `self._stack.currentWidget()`:
+
+- PDF (`_pdf_view`, a QPdfView): use `self._pdf_view.setZoomMode(QPdfView.ZoomMode.Custom)` with `self._pdf_view.setZoomFactor(factor)` for zoom in/out (step by roughly x1.25 / ÷1.25, clamp to a sensible range e.g. 0.25-4.0), and `self._pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)` for the Fit button. In `_show_pdf`, set the initial zoom mode to `QPdfView.ZoomMode.FitToWidth` by default (not left at whatever Qt's default is) — this directly fixes "PDFs open too zoomed in."
+- Images (`_label_view`, a QLabel currently set via `_show_image` with the pixmap at native size): store the original QPixmap separately (e.g. `self._original_image_pixmap`) instead of only ever setting it once, and add a `self._image_zoom_factor` (default computed to fit within the label's/window's current size on first display — e.g. `min(1.0, available_width / pixmap.width(), available_height / pixmap.height())` — so a large image starts fit-to-window instead of native size). Zoom in/out re-render via `self._original_image_pixmap.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)` and `setPixmap(...)` with the new size. Fit button recomputes the fit-to-window factor and re-renders.
+- Text (`_text_view`, a QPlainTextEdit): Qt already provides `zoomIn(range)`/`zoomOut(range)` built in — just call those for zoom in/out; for Fit, reset to the widget's default font point size (store it once at construction).
+
+The zoom toolbar's buttons should stay enabled/disabled sensibly (e.g. no need to disable anything if the same three actions apply to all three content types, just make sure they're only meaningfully connected once a document is actually shown — safe to leave always-enabled given every branch handles a "not yet shown anything" case gracefully, e.g. by no-op'ing if `self._stack.currentWidget()` is not yet meaningful).
+
+Keep the existing copy/edit lockdown (_NoCopyMixin) completely untouched — zoom is a view-only operation, does not need to interact with the clipboard/context-menu restrictions at all.
+
+===========================================================================
+Testing
+===========================================================================
+
+- Add/update tests confirming `important=True` status calls trigger a popup (mock/patch QMessageBox rather than actually blocking test execution on a real modal dialog) for each of the call sites listed in section 1, and that routine calls do not.
+- Add/update tests confirming the source-file and private-key path resets in section 2 happen at the right points (export-key success for encryption_page.py, viewer-closed for decryption_page.py) and that the relevant buttons become disabled again afterward.
+- Add/update tests in tests/test_secure_viewer_widget.py (or equivalent) confirming: `_show_pdf` sets `QPdfView.ZoomMode.FitToWidth` initially; `_zoom_in`/`_zoom_out`/`_zoom_fit` change the effective zoom for whichever content type is current; a large image's initial display is scaled to fit rather than shown at native size.
+- Run the full test suite and ruff lint after the change; fix anything broken.
+
+Do not touch any other files, pages, or the crypto/security/metadata core modules — all three of these are UI-layer changes only. After implementing, run tests and lint, confirm the app launches, then stop — do not proceed to any other phase automatically.

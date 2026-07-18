@@ -29,6 +29,7 @@ from core.logger import get_logger
 from tracking.models import UsageRecord
 from tracking.tracking_service import UsageTracker
 from ui.pages.base_page import BasePage
+from ui.widgets.busy import show_result_popup
 
 logger = get_logger(__name__)
 
@@ -172,14 +173,18 @@ class TrackingPage(BasePage):
 
         result = self._usage_tracker.verify_log_integrity()
         if result.ok:
-            self._show_status(f"Log integrity verified: {result.verified_count} entrie(s), chain intact.")
+            self._show_status(
+                f"Log integrity verified: {result.verified_count} entrie(s), chain intact.", important=True
+            )
         else:
-            self._show_status(f"Log integrity check FAILED: {result.reason}", ok=False)
+            self._show_status(f"Log integrity check FAILED: {result.reason}", ok=False, important=True)
 
-    def _show_status(self, message: str, ok: bool = True) -> None:
+    def _show_status(self, message: str, ok: bool = True, important: bool = False) -> None:
         self.status_label.setText(message)
         self.status_label.setStyleSheet(f"color: {(_OK_COLOR if ok else _FAIL_COLOR).name()};")
         if ok:
             logger.info(message)
         else:
             logger.warning(message)
+        if important:
+            show_result_popup(self, message, ok=ok)

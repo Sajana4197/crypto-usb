@@ -46,6 +46,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -66,12 +67,13 @@ from core.logger import get_logger
 from crypto import rsa_keypair
 from crypto.exceptions import CryptoError
 from crypto.key_wrapper import RSAOAEPKeyWrapper
+from metadata.models import UsagePolicy
 from metadata.protection import MetadataProtectionKeys
 from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
 from security.password_hasher import MIN_PASSWORD_LENGTH
 from ui.pages.base_page import BasePage
-from ui.widgets.busy import busy_cursor, progress_dialog
+from ui.widgets.busy import busy_cursor, progress_dialog, show_result_popup
 from usb.device_detector import USBDevice, USBDeviceDetector
 from usb.exceptions import ContainerOverwriteError, USBError
 from usb.secure_storage_service import SecureStorageService, SecureWriteResult
@@ -191,6 +193,14 @@ class EncryptionPage(BasePage):
         self.source_file_label.setWordWrap(True)
         row.addWidget(self.source_file_label, 1)
         layout.addLayout(row)
+
+        self.one_time_access_checkbox = QCheckBox("One-time access (file is destroyed after first successful view)")
+        self.one_time_access_checkbox.setToolTip(
+            "Once enabled, this file can only be viewed successfully once — any "
+            "attempt after the first will silently receive fake content instead "
+            "of an error, matching the app's deception design."
+        )
+        layout.addWidget(self.one_time_access_checkbox)
 
         self.write_button = QPushButton("Write Secure Container")
         self.write_button.setObjectName("primaryButton")
@@ -390,11 +400,17 @@ class EncryptionPage(BasePage):
             Path(path).write_bytes(private_pem)
         except (CryptoError, OSError) as exc:
             logger.error("Failed to export private key to %s: %s", path, exc)
-            self._show_status(f"Failed to export private key: {exc}", ok=False)
+            self._show_status(f"Failed to export private key: {exc}", ok=False, important=True)
             return
 
-        self._show_status(f"Exported encrypted private key to {path}. Keep it and its passphrase safe.")
+        self._show_status(
+            f"Exported encrypted private key to {path}. Keep it and its passphrase safe.", important=True
+        )
         logger.info("Exported session file-wrapping private key to %s", path)
+
+        self._source_path = None
+        self.source_file_label.setText("No file selected.")
+        self._update_write_button_state()
 
     def _on_write_clicked(self) -> None:
         if self._selected_device is None or self._source_path is None:
@@ -426,6 +442,7 @@ class EncryptionPage(BasePage):
                     protection_keys=self._protection_keys,
                     metadata_repository=self._metadata_repository,
                     bind_to_device=True,
+                    usage_policy=UsagePolicy(one_time_access=self.one_time_access_checkbox.isChecked()),
                 )
         except ContainerOverwriteError:
             if self._confirm_overwrite():
@@ -435,14 +452,16 @@ class EncryptionPage(BasePage):
             return
         except USBError as exc:
             logger.error("Secure write failed: %s", exc)
-            self._show_status(f"Write failed: {exc}", ok=False)
+            self._show_status(f"Write failed: {exc}", ok=False, important=True)
             return
 
         self._last_write = result
+        self.one_time_access_checkbox.setChecked(False)
         self._show_status(
             f"Wrote secure container {result.destination.name} "
             f"({result.container_size_bytes:,} bytes) to {device.mount_point}. "
-            f"Post-write integrity check passed."
+            f"Post-write integrity check passed.",
+            important=True,
         )
         # Refresh the container table for the device just written to — not
         # necessarily whatever `self._selected_device` is *now*, in the rare
@@ -486,10 +505,12 @@ class EncryptionPage(BasePage):
 
     # -- Status ------------------------------------------------------------
 
-    def _show_status(self, message: str, ok: bool = True) -> None:
+    def _show_status(self, message: str, ok: bool = True, important: bool = False) -> None:
         self.status_label.setText(message)
         self.status_label.setStyleSheet(f"color: {(_OK_COLOR if ok else _FAIL_COLOR).name()};")
         if ok:
             logger.info(message)
         else:
             logger.warning(message)
+        if important:
+            show_result_popup(self, message, ok=ok)

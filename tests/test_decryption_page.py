@@ -28,6 +28,20 @@ from ui.pages.encryption_page import EncryptionPage
 from usb.device_detector import USBDevice
 
 
+@pytest.fixture(autouse=True)
+def mock_result_popup(monkeypatch):
+    """`important=True` status calls now pop up a real, blocking
+    `QMessageBox` -- autouse so every test in this file is safe by
+    default; tests that specifically assert on popup behavior can still
+    take this fixture as a parameter to inspect the same mock. Patches
+    both modules: this file's integration tests drive `EncryptionPage`
+    writes (also `important=True` now) as well as `DecryptionPage`."""
+    mock = MagicMock()
+    monkeypatch.setattr("ui.pages.decryption_page.show_result_popup", mock)
+    monkeypatch.setattr("ui.pages.encryption_page.show_result_popup", mock)
+    return mock
+
+
 def _device(mount_point: str, free_bytes: int = 100_000_000) -> USBDevice:
     return USBDevice(
         device_id=mount_point,
@@ -156,6 +170,92 @@ def test_encryption_page_writes_and_decryption_page_reads_it_back(tmp_path, encr
     assert records[0].authentication_result is True
     assert records[0].validation_result is True
     assert tracker.verify_log_integrity().ok is True
+
+
+def test_view_open_and_close_do_not_pop_up_but_reset_the_loaded_key(
+    tmp_path, encryption_page, decryption_page, mock_result_popup
+):
+    source = tmp_path / "findings.txt"
+    source.write_text("the quarterly figures are confidential", encoding="utf-8")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    encryption_page._devices = [device]
+    encryption_page._populate_table()
+    encryption_page.table.selectRow(0)
+    encryption_page._source_path = source
+    encryption_page._update_write_button_state()
+    encryption_page._on_write_clicked()
+
+    exported_key_path = tmp_path / "key.pem"
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), patch.object(
+        QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
+    ):
+        encryption_page._on_export_key_clicked()
+
+    decryption_page._devices = [device]
+    decryption_page._selected_device = device
+    decryption_page._refresh_containers()
+
+    decryption_page.key_path_label.setText(str(exported_key_path))
+    decryption_page.passphrase_edit.setText("a-strong-passphrase")
+    decryption_page._on_load_key_clicked()
+    mock_result_popup.reset_mock()  # only care about view-open/close popups below
+
+    decryption_page.container_table.selectRow(0)
+    decryption_page._on_view_clicked()
+
+    # Opening the viewer is not a pass/fail action in its own right --
+    # no popup.
+    mock_result_popup.assert_not_called()
+
+    decryption_page._active_viewer.close()
+
+    # Nor is closing it.
+    mock_result_popup.assert_not_called()
+
+    # The loaded key was scoped to that viewing session -- it must not
+    # silently remain usable for a different container without the user
+    # deliberately reloading it.
+    assert decryption_page._key_wrapper is None
+    assert decryption_page.key_path_label.text() == "No private key loaded."
+    assert decryption_page.passphrase_edit.text() == ""
+    assert decryption_page.view_button.isEnabled() is False
+
+
+def test_load_key_success_pops_up_result(tmp_path, decryption_page, mock_result_popup):
+    from crypto import rsa_keypair
+
+    keypair = rsa_keypair.generate_rsa_keypair()
+    pem = rsa_keypair.serialize_private_key(keypair.private_key, b"correct-passphrase")
+    key_path = tmp_path / "key.pem"
+    key_path.write_bytes(pem)
+
+    decryption_page.key_path_label.setText(str(key_path))
+    decryption_page.passphrase_edit.setText("correct-passphrase")
+    decryption_page._on_load_key_clicked()
+
+    mock_result_popup.assert_called_once()
+    _, kwargs = mock_result_popup.call_args
+    assert kwargs.get("ok", True) is True
+
+
+def test_load_key_failure_pops_up_result(tmp_path, decryption_page, mock_result_popup):
+    from crypto import rsa_keypair
+
+    keypair = rsa_keypair.generate_rsa_keypair()
+    pem = rsa_keypair.serialize_private_key(keypair.private_key, b"correct-passphrase")
+    key_path = tmp_path / "key.pem"
+    key_path.write_bytes(pem)
+
+    decryption_page.key_path_label.setText(str(key_path))
+    decryption_page.passphrase_edit.setText("wrong-passphrase")
+    decryption_page._on_load_key_clicked()
+
+    mock_result_popup.assert_called_once()
+    _, kwargs = mock_result_popup.call_args
+    assert kwargs["ok"] is False
 
 
 def test_view_refused_without_an_authenticated_session(tmp_path, metadata_repository, protection_keys, app):

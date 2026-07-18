@@ -33,6 +33,7 @@ from security.models import AuthMethod, UserAccount
 from security.password_hasher import MIN_PASSWORD_LENGTH
 from ui.dialogs.recovery_dialog import RecoveryCodeDialog
 from ui.pages.base_page import BasePage
+from ui.widgets.busy import show_result_popup
 
 logger = get_logger(__name__)
 
@@ -148,7 +149,7 @@ class SettingsPage(BasePage):
 
         new_password = self.new_password_edit.text()
         if new_password != self.confirm_password_edit.text():
-            self._set_password_status("New passwords do not match.", error=True)
+            self._set_password_status("New passwords do not match.", error=True, important=True)
             return
 
         try:
@@ -156,26 +157,30 @@ class SettingsPage(BasePage):
                 self._owner_id, self.current_password_edit.text(), new_password
             )
         except AccountLockedError as exc:
-            self._set_password_status(f"Account locked: try again in {exc.seconds_remaining} second(s).", error=True)
+            self._set_password_status(
+                f"Account locked: try again in {exc.seconds_remaining} second(s).", error=True, important=True
+            )
             return
         except InvalidCredentialsError as exc:
-            self._set_password_status(str(exc), error=True)
+            self._set_password_status(str(exc), error=True, important=True)
             return
         except WeakPasswordError as exc:
-            self._set_password_status(str(exc), error=True)
+            self._set_password_status(str(exc), error=True, important=True)
             return
         except SecurityError as exc:
-            self._set_password_status(str(exc), error=True)
+            self._set_password_status(str(exc), error=True, important=True)
             return
 
         self.current_password_edit.clear()
         self.new_password_edit.clear()
         self.confirm_password_edit.clear()
-        self._set_password_status("Password changed successfully.", error=False)
+        self._set_password_status("Password changed successfully.", error=False, important=True)
         logger.info("Password changed via Settings page for owner_id=%s", self._owner_id)
 
         RecoveryCodeDialog(recovery_code, replaces_previous_code=True, parent=self).exec()
 
-    def _set_password_status(self, message: str, error: bool) -> None:
+    def _set_password_status(self, message: str, error: bool, important: bool = False) -> None:
         self.password_status_label.setStyleSheet(f"color: {'#e5484d' if error else '#3ecf8e'};")
         self.password_status_label.setText(message)
+        if important:
+            show_result_popup(self, message, ok=not error)

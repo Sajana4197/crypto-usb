@@ -1,6 +1,7 @@
 """Tests for the Settings page's Change Password section."""
 
 import sqlite3
+from unittest.mock import MagicMock
 
 import pytest
 from PySide6.QtWidgets import QApplication, QDialog
@@ -14,6 +15,17 @@ from ui.pages.settings_page import SettingsPage
 
 def _app():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def mock_result_popup(monkeypatch):
+    """`important=True` status calls now pop up a real, blocking
+    `QMessageBox` -- autouse so every test in this file is safe by
+    default; tests that specifically assert on popup behavior can still
+    take this fixture as a parameter to inspect the same mock."""
+    mock = MagicMock()
+    monkeypatch.setattr("ui.pages.settings_page.show_result_popup", mock)
+    return mock
 
 
 @pytest.fixture
@@ -94,6 +106,35 @@ def test_change_password_shows_new_recovery_code(controller, monkeypatch):
     assert _FakeRecoveryCodeDialog.last_code is not None
     assert _FakeRecoveryCodeDialog.last_code != old_recovery_code
     assert _FakeRecoveryCodeDialog.last_replaces_previous_code is True
+
+
+def test_change_password_success_pops_up_result(controller, monkeypatch, mock_result_popup):
+    monkeypatch.setattr("ui.pages.settings_page.RecoveryCodeDialog", _FakeRecoveryCodeDialog)
+    controller.register_password_account("owner-1", "correct-password")
+    page = SettingsPage(auth_controller=controller, owner_id="owner-1")
+
+    page.current_password_edit.setText("correct-password")
+    page.new_password_edit.setText("brand-new-password")
+    page.confirm_password_edit.setText("brand-new-password")
+    page._on_change_password_clicked()
+
+    mock_result_popup.assert_called_once()
+    _, kwargs = mock_result_popup.call_args
+    assert kwargs.get("ok", True) is True
+
+
+def test_change_password_wrong_current_password_pops_up_result(controller, mock_result_popup):
+    controller.register_password_account("owner-1", "correct-password")
+    page = SettingsPage(auth_controller=controller, owner_id="owner-1")
+
+    page.current_password_edit.setText("wrong-password")
+    page.new_password_edit.setText("brand-new-password")
+    page.confirm_password_edit.setText("brand-new-password")
+    page._on_change_password_clicked()
+
+    mock_result_popup.assert_called_once()
+    _, kwargs = mock_result_popup.call_args
+    assert kwargs["ok"] is False
 
 
 def test_change_password_wrong_current_password_shows_error(controller):
