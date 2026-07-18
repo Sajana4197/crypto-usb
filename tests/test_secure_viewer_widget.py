@@ -65,6 +65,16 @@ def test_displays_pdf(widget, app):
     assert widget._stack.currentWidget() is widget._pdf_view
 
 
+def test_pdf_view_uses_multi_page_mode_so_all_pages_are_reachable(widget):
+    """`QPdfView` defaults to `SinglePage` mode, which stranded multi-page
+    PDFs on page 1 with no navigation control anywhere in the UI to
+    reach later pages; `MultiPage` renders the whole document as one
+    continuous scrollable view instead."""
+    from PySide6.QtPdfWidgets import QPdfView
+
+    assert widget._pdf_view.pageMode() == QPdfView.PageMode.MultiPage
+
+
 def test_unsupported_content_type_shows_a_notice_instead_of_raising(widget):
     widget.display(b"PK\x03\x04 pretend zip bytes", "application/zip")
 

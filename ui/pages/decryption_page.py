@@ -418,7 +418,8 @@ class DecryptionPage(BasePage):
             logger.warning("Decryption attempted without an authenticated session; refusing.")
             self._show_status("You must be signed in to view a file.", ok=False)
             return
-        if self._metadata_repository is None:
+        is_decoy = self._session_manager.current.is_decoy
+        if self._metadata_repository is None and not is_decoy:
             self._show_status("No metadata repository is available in this session.", ok=False)
             return
 

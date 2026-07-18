@@ -138,7 +138,7 @@ class SecureAccessService:
 
     def __init__(
         self,
-        repository: MetadataRepository,
+        repository: Optional[MetadataRepository],
         decryptor: Optional[SecureDecryptor] = None,
         deception_engine: Optional[DeceptionEngine] = None,
         enforcer: Optional[OneTimeAccessEnforcer] = None,

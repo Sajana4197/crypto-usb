@@ -14,6 +14,8 @@ from core.constants import APP_NAME, APP_ORGANIZATION, APP_VERSION, LOCAL_OWNER_
 from core.logger import get_logger, setup_logging
 from crypto.secure_cleanup import CleanupReason, cleanup
 from database.db_manager import DatabaseManager
+from deception.deception_engine import DeceptionEngine
+from deception.event_repository import DeceptionEventRepository
 from security.account_repository import AccountRepository
 from security.auth_controller import AuthController
 from security.auth_session import SessionManager
@@ -50,8 +52,11 @@ def bootstrap() -> tuple[QApplication, Optional[MainWindow]]:
 
     app = create_application()
 
+    deception_event_repository = DeceptionEventRepository(db_manager.connect())
+    deception_engine = DeceptionEngine(event_repository=deception_event_repository)
+
     account_repository = AccountRepository(db_manager.connect())
-    auth_controller = AuthController(account_repository)
+    auth_controller = AuthController(account_repository, deception_engine=deception_engine)
     session_manager = SessionManager()
 
     auth_dialog = AuthDialog(auth_controller, owner_id=LOCAL_OWNER_ID)

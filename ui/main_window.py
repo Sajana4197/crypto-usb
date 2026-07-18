@@ -127,11 +127,12 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
         self.statusBar().showMessage("Ready")
 
-        last_page = config_manager.config.last_page
-        if last_page not in self._page_index:
-            last_page = "dashboard"
-        self.navigation.set_active(last_page)
-        self._navigate_to(last_page)
+        # Every login starts on the Dashboard, regardless of which page
+        # was open when the app was last closed (`config.last_page` is
+        # still persisted on every navigation, for whatever future use
+        # wants it — it's just not consulted for the startup page).
+        self.navigation.set_active("dashboard")
+        self._navigate_to("dashboard")
 
     def _build_shared_services(
         self,

@@ -1,0 +1,22 @@
+Fix a bug in the crypto-usb project: the login screen's wrong-credentials deception trigger is never recorded to the audit trail.
+
+Root cause: app/main.py's bootstrap() function constructs the AuthController used by the real sign-in dialog like this (currently line 53-54):
+
+    account_repository = AccountRepository(db_manager.connect())
+    auth_controller = AuthController(account_repository)
+
+No deception_engine argument is passed. security/auth_controller.py's AuthController.__init__ falls back to "self._deception_engine = deception_engine or DeceptionEngine()" — a bare DeceptionEngine() with no event_repository. A DeceptionEventRepository is never even constructed anywhere in bootstrap() at all; it's only built later, inside ui/main_window.py's MainWindow._build_shared_services(), which runs AFTER the login dialog has already completed. So when authenticate_password/authenticate_private_key call self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS) on a wrong password (Phase 20 behavior), deception/deception_engine.py's DeceptionEngine.activate() reaches "if self._event_repository is not None: self._event_repository.record(...)" and skips it, since self._event_repository is None — the event is only ever logged to the log file, never persisted to the deception_events table. That's why the Dashboard's "Deception Triggers" stat card and the Deception Module page's audit trail never show it, even after a subsequent correct login.
+
+Fix, in app/main.py's bootstrap():
+1. Import DeceptionEventRepository from deception.event_repository and DeceptionEngine from deception.deception_engine.
+2. Right after "db_manager.initialize()" (and before or alongside constructing account_repository), construct: "deception_event_repository = DeceptionEventRepository(db_manager.connect())". This only needs the raw connection — deception event rows are not credential-wrapped (only the metadata/tracking protection keys are, per Phase 21), so this is safe to build before authentication happens.
+3. Construct "deception_engine = DeceptionEngine(event_repository=deception_event_repository)".
+4. Change the AuthController construction to: "auth_controller = AuthController(account_repository, deception_engine=deception_engine)".
+
+Do not change anything else in bootstrap() or in AuthController itself — AuthController already accepts an optional deception_engine parameter (added in Phase 20), it was simply never supplied at this call site. Do not touch the second AuthController construction in ui/main_window.py (used for the Settings page's change-password flow) — that one deliberately has no deception behavior (change_password/reset_password_with_recovery_code were excluded from decoy behavior by design in Phase 20), so it's correct as-is and out of scope here.
+
+Testing:
+- Add/update a test around app/main.py's bootstrap() (or wherever it's already covered, e.g. tests/test_integration_workflow.py or tests/test_e2e_demo.py) verifying that a wrong-password login attempt results in a row being recorded via DeceptionEventRepository — i.e. that AuthController is now constructed with a deception_engine wired to a real event_repository, not the default bare DeceptionEngine().
+- Run the full test suite and ruff lint; fix anything broken.
+
+Do not touch any other files. After implementing, run tests and lint, confirm the app launches, then manually verify: log in with a wrong password once, log out, log back in with the correct password, and confirm the Dashboard's "Deception Triggers" stat card and the Deception Module page's audit trail now show that wrong-password attempt. Then stop — do not proceed to any other phase automatically.

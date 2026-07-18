@@ -280,6 +280,68 @@ def test_view_click_does_not_force_deception_for_a_real_session(
             decryption_page._active_viewer.close()
 
 
+def test_view_click_with_decoy_session_and_no_metadata_repository_reaches_deception(
+    tmp_path, app, protection_keys
+):
+    """A decoy session never gets a real `metadata_repository`
+    (`MainWindow._build_shared_services` returns `None` whenever there's
+    no `vault_key`, which is always true for a decoy session) — viewing
+    a file must still reach the deception path instead of being
+    intercepted by the "no metadata repository" guard."""
+    decoy_session_manager = SessionManager()
+    decoy_session_manager.set(
+        AuthSession(
+            owner_id="owner-1",
+            method=AuthMethod.PASSWORD,
+            authenticated_at=datetime.now(timezone.utc),
+            is_decoy=True,
+        )
+    )
+    page = DecryptionPage(
+        metadata_repository=None,
+        protection_keys=protection_keys,
+        session_manager=decoy_session_manager,
+    )
+    mock_outcome = _stub_attempt_access_call(page, tmp_path)
+
+    try:
+        with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+            mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+            page._on_view_clicked()
+
+        assert "no metadata repository" not in page.status_label.text().lower()
+        mock_service_cls.return_value.attempt_access.assert_called_once()
+        _, kwargs = mock_service_cls.return_value.attempt_access.call_args
+        assert kwargs["force_deception"] is True
+        assert page._active_viewer is not None
+        assert page._active_viewer._text_view.toPlainText() == "decoy content"
+    finally:
+        if page._active_viewer is not None and not page._active_viewer.is_closed:
+            page._active_viewer.close()
+
+
+def test_view_click_with_no_metadata_repository_and_real_session_shows_real_error(
+    tmp_path, app, protection_keys, session_manager
+):
+    """A genuinely misconfigured non-decoy session (no `db_manager` at
+    all) must still get the real error, not be waved through as if it
+    were a decoy."""
+    page = DecryptionPage(
+        metadata_repository=None,
+        protection_keys=protection_keys,
+        session_manager=session_manager,
+    )
+    page._selected_container = tmp_path / "container.cusc"
+    page._key_wrapper = object()  # any non-None sentinel
+
+    with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+        page._on_view_clicked()
+        mock_service_cls.assert_not_called()
+
+    assert page._active_viewer is None
+    assert "no metadata repository is available in this session" in page.status_label.text().lower()
+
+
 # -- Viewer close / screen-capture wiring (Phase 22) ------------------------
 
 

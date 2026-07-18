@@ -7,6 +7,8 @@ from PySide6.QtWidgets import QDialog
 
 import app.main as main_module
 from crypto.secure_cleanup import CleanupReason
+from deception.event_repository import DeceptionEventRepository
+from deception.triggers import DeceptionTrigger
 from security.auth_session import AuthSession
 from security.models import AuthMethod
 
@@ -76,6 +78,37 @@ def test_closing_the_window_clears_the_session_and_runs_exit_cleanup(tmp_path, m
         assert window.session_manager.current is None
     finally:
         window.db_manager.close()
+
+
+def test_bootstrap_wires_deception_engine_so_wrong_password_is_recorded(tmp_path, monkeypatch):
+    """The `AuthController` bootstrap() builds for the real sign-in dialog
+    must be wired to a `DeceptionEngine` backed by a real
+    `DeceptionEventRepository` — not the bare, non-persisting default —
+    so a wrong-password attempt (which authenticate_password turns into
+    a decoy session rather than an error) leaves a row in the audit
+    trail the Dashboard/Deception Module pages read from later."""
+    _patch_paths(tmp_path, monkeypatch)
+
+    def _fake_exec(self):
+        self._controller.register_password_account(self._owner_id, "correct-password")
+        self.session = self._controller.authenticate_password(self._owner_id, "definitely-wrong-password")
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(main_module.AuthDialog, "exec", _fake_exec)
+
+    app, window = main_module.bootstrap()
+
+    try:
+        assert window is not None
+        assert window.session_manager.current.is_decoy is True
+
+        events = DeceptionEventRepository(window.db_manager.connect()).list_events()
+        assert len(events) == 1
+        assert events[0].trigger == DeceptionTrigger.WRONG_CREDENTIALS
+    finally:
+        if window is not None:
+            window.close()
+            window.db_manager.close()
 
 
 def test_bootstrap_runs_exit_cleanup_when_auth_is_cancelled(tmp_path, monkeypatch):

@@ -138,6 +138,7 @@ class _SecurePdfView(_NoCopyMixin, QPdfView):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._lockdown()
+        self.setPageMode(QPdfView.PageMode.MultiPage)
 
 
 class SecureViewerWidget(QWidget):

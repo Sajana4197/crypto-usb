@@ -54,6 +54,29 @@ def test_all_pages_are_reachable(tmp_path, monkeypatch):
         db_manager.close()
 
 
+def test_startup_always_opens_dashboard_even_with_a_different_persisted_last_page(tmp_path, monkeypatch):
+    """Every login must land on the Dashboard, regardless of which page
+    was open when the app was last closed — `config.last_page` is still
+    persisted on navigation, but must not be consulted for the startup
+    page."""
+    monkeypatch.setattr("app.config.get_config_path", lambda: tmp_path / "config.json")
+    monkeypatch.setattr("database.db_manager.get_database_path", lambda: tmp_path / "db.sqlite")
+
+    app = QApplication.instance() or QApplication([])
+
+    config_manager = ConfigManager()
+    config_manager.update(last_page="settings")
+
+    theme_manager = ThemeManager(app, theme=config_manager.config.theme)
+    theme_manager.apply()
+
+    window = MainWindow(config_manager, theme_manager)
+    try:
+        assert window.stack.currentWidget() is window._pages["dashboard"]
+    finally:
+        window.close()
+
+
 def test_build_shared_services_all_none_without_session_manager(tmp_path, monkeypatch):
     app, window, db_manager = _build_window(tmp_path, monkeypatch)
     try:
