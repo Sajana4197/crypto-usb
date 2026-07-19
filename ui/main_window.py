@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QWidget
 
 from app.config import ConfigManager
@@ -41,6 +41,7 @@ from ui.pages.security_page import SecurityPage
 from ui.pages.settings_page import SettingsPage
 from ui.pages.tracking_page import TrackingPage
 from ui.theme.theme_manager import ThemeManager
+from utils.paths import get_icons_dir
 
 logger = get_logger(__name__)
 
@@ -61,6 +62,7 @@ class MainWindow(QMainWindow):
         self.session_manager = session_manager
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
+        self.setWindowIcon(QIcon(str(get_icons_dir() / "app_icon.ico")))
         self.setMinimumSize(960, 600)
         self.resize(config_manager.config.window_width, config_manager.config.window_height)
 

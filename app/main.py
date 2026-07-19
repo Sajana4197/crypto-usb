@@ -6,6 +6,7 @@ import sys
 from typing import Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QDialog
 
 from app.config import ConfigManager
@@ -22,6 +23,7 @@ from security.auth_session import SessionManager
 from ui.dialogs.auth_dialog import AuthDialog
 from ui.main_window import MainWindow
 from ui.theme.theme_manager import ThemeManager
+from utils.paths import get_icons_dir
 
 
 def create_application() -> QApplication:
@@ -32,6 +34,10 @@ def create_application() -> QApplication:
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_ORGANIZATION)
+    # App-wide default icon (taskbar, the auth dialog, every window that
+    # doesn't set its own) before any window is shown — `MainWindow` also
+    # sets it explicitly for correct taskbar grouping on Windows.
+    app.setWindowIcon(QIcon(str(get_icons_dir() / "app_icon.ico")))
     return app
 
 
