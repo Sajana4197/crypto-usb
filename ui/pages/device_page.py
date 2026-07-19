@@ -71,7 +71,7 @@ class DevicePage(BasePage):
         self._detector = USBDeviceDetector()
         self._validator = USBDeviceValidator()
 
-        self._devices: list[USBDevice] = []
+        self._devices: Optional[list[USBDevice]] = None
         self._selected_device: USBDevice | None = None
 
         self.add_widget(self._build_device_toolbar())

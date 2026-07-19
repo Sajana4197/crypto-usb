@@ -223,6 +223,8 @@ class SecureAccessService:
             on_screen_capture_detected = None
             if record is not None:
                 self._usage_tracker.record_validation_result(record, False)
+                if trigger in (DeceptionTrigger.METADATA_TAMPERING, DeceptionTrigger.INTEGRITY_FAILURE):
+                    self._usage_tracker.record_tampering_event(record)
                 on_view_closed = partial(self._usage_tracker.record_close, record)
                 on_screen_capture_detected = partial(self._usage_tracker.record_screen_capture_attempt, record)
             cleanup(CleanupReason.VALIDATION_FAILURE)

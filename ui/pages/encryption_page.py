@@ -113,7 +113,7 @@ class EncryptionPage(BasePage):
         self._protection_keys = protection_keys
         self._session_manager = session_manager
 
-        self._devices: list[USBDevice] = []
+        self._devices: Optional[list[USBDevice]] = None
         self._selected_device: USBDevice | None = None
         self._containers: list[Path] = []
         self._source_path: Path | None = None

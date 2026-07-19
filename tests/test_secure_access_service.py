@@ -307,6 +307,92 @@ def test_missing_metadata_triggers_metadata_tampering_deception(service, wrapper
     assert outcome.deception.trigger is DeceptionTrigger.METADATA_TAMPERING
 
 
+# -- record_tampering_event fires only for genuine tampering triggers -----
+
+
+def test_metadata_tampering_deception_records_tampering_event(
+    controller, container, container_bytes, wrapper, keys, repository, tracker
+):
+    _create(controller, container, container_bytes)
+    protected = repository.load("file-1")
+    tampered_tag = bytearray(protected.hmac_tag)
+    tampered_tag[0] ^= 0xFF
+    protected.hmac_tag = bytes(tampered_tag)
+    repository.save(protected)
+    service = SecureAccessService(repository, usage_tracker=tracker)
+
+    outcome = service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector())
+
+    assert outcome.deception.trigger is DeceptionTrigger.METADATA_TAMPERING
+    tracker.record_tampering_event.assert_called_once_with(tracker.start_session.return_value)
+
+
+def test_integrity_failure_deception_records_tampering_event(
+    controller, container, container_bytes, wrapper, keys, repository, tracker
+):
+    _create(controller, container, container_bytes)
+    service = SecureAccessService(repository, usage_tracker=tracker)
+
+    outcome = service.attempt_access("file-1", b"corrupted-container-bytes", wrapper, keys, _Collector())
+
+    assert outcome.deception.trigger is DeceptionTrigger.INTEGRITY_FAILURE
+    tracker.record_tampering_event.assert_called_once_with(tracker.start_session.return_value)
+
+
+def test_device_mismatch_deception_does_not_record_tampering_event(
+    controller, container, container_bytes, wrapper, keys, repository, tracker
+):
+    _create(
+        controller,
+        container,
+        container_bytes,
+        device_binding=DeviceBinding(bound=True, device_id="E:\\", usb_serial="ABCD:FAT32:1000"),
+    )
+    service = SecureAccessService(repository, usage_tracker=tracker)
+
+    outcome = service.attempt_access(
+        "file-1", container_bytes, wrapper, keys, _Collector(), current_usb_identifier=None
+    )
+
+    assert outcome.deception.trigger is DeceptionTrigger.DEVICE_MISMATCH
+    tracker.record_tampering_event.assert_not_called()
+
+
+def test_access_already_used_deception_does_not_record_tampering_event(
+    controller, container, container_bytes, wrapper, keys, repository, tracker
+):
+    _create(
+        controller,
+        container,
+        container_bytes,
+        expiry_rules=ExpiryRules(expires_at=datetime.now(timezone.utc) - timedelta(days=1)),
+    )
+    service = SecureAccessService(repository, usage_tracker=tracker)
+
+    outcome = service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector())
+
+    assert outcome.deception.trigger is DeceptionTrigger.ACCESS_ALREADY_USED
+    tracker.record_tampering_event.assert_not_called()
+
+
+def test_decrypt_failure_after_validation_pass_does_not_record_tampering_event(
+    controller, container, container_bytes, wrapper, keys, repository, tracker
+):
+    # The reuse-of-a-burned-file path (decrypt fails despite validation
+    # passing) maps to ACCESS_ALREADY_USED too, but via a different branch
+    # than the validation-failure one above — confirm it's equally excluded.
+    _create(controller, container, container_bytes, usage_policy=UsagePolicy(one_time_access=True))
+    service = SecureAccessService(repository, usage_tracker=tracker)
+    first = service.attempt_access("file-1", container_bytes, wrapper, keys, _Collector())
+    assert first.granted is True
+    tracker.record_tampering_event.reset_mock()
+
+    outcome = service.attempt_access("file-1", container_bytes, wrapper, first.protection_keys, _Collector())
+
+    assert outcome.deception.trigger is DeceptionTrigger.ACCESS_ALREADY_USED
+    tracker.record_tampering_event.assert_not_called()
+
+
 # -- Trigger-mapping pure logic --------------------------------------------
 
 

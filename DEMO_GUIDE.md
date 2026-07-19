@@ -1,6 +1,6 @@
 # CryptoUSB — Step-by-Step Demonstration Guide
 
-A full walkthrough of every feature, in demo order. Each step says what to click, what you should see, and which proposal requirement it proves. Two known gaps are called out explicitly (marked **⚠ GAP**) so you're never surprised live.
+A full walkthrough of every feature, in demo order. Each step says what to click, what you should see, and which proposal requirement it proves. Every requirement below is fully live — no known feature gaps — but a few UI behaviors worth narrating on purpose are called out inline (e.g. Part 4.3).
 
 ---
 
@@ -54,9 +54,11 @@ This page is pure device health-checking now — no file/encryption controls liv
 **3.2 Encrypt File (nav item) — the real sender workflow**
 1. Select the same USB drive in this page's own device table.
 2. **Choose File...** → pick your first test file.
-3. **Write Secure Container**.
-4. **Expect:** a status line reading *"Wrote and fully verified ... — decryption round-trip and metadata integrity confirmed in memory; no plaintext was written to disk"*, **and** the file now appears in the **"Files encrypted on this device"** table below, immediately — no manual refresh needed.
-5. Click **Export Key Pair for Decryption...**, set a passphrase, save the `.pem` file somewhere you can find it. **Say out loud**: without doing this step, this file can never be decrypted by anyone, including you — the app keeps no copy.
+3. Leave the **"One-time access"** checkbox unchecked for now (you'll demo it in Part 5), then click **Write Secure Container**.
+4. **Expect:** a confirmation popup **and** a status line reading *"Wrote and fully verified ... — decryption round-trip and metadata integrity confirmed in memory; no plaintext was written to disk"*, **and** the file now appears in the **"Files encrypted on this device"** table below, immediately — no manual refresh needed.
+5. Click **Export Key Pair for Decryption...**, set a passphrase, save the `.pem` file somewhere you can find it. **Say out loud**: without doing this step, this file can never be decrypted by anyone, including you — the app keeps no copy. (Note: the selected file clears automatically right after export, so pick the file again if you want to write another container.)
+
+**Say out loud — how the receiver actually gets the key + passphrase:** in a real deployment this `.pem` file and its passphrase reach the receiver through **two separate, out-of-band channels** — e.g. the sender emails the file, then calls the receiver to give them the passphrase. They're deliberately never sent together: intercepting one channel alone gets an attacker nothing. The app doesn't handle this transmission at all, by design — it only guarantees the file is useless without both pieces. You're playing both roles on one machine for this demo, so you already have both; narrate the split explicitly so it doesn't look like a gap.
 
 → *Proves: hybrid AES+RSA encryption, unique key per file, metadata-driven storage, RAM-only round-trip verification (Requirements 4, 8, 10).*
 
@@ -66,14 +68,18 @@ This page is pure device health-checking now — no file/encryption controls liv
 
 **4.1 Decrypt & View (nav item)**
 1. Select the USB drive.
-2. **Browse Private Key File...** → pick the `.pem` you exported in 3.2, enter its passphrase, **Load Key**.
+2. **Browse Private Key File...** → pick the `.pem` you exported in 3.2, enter its passphrase, **Load Key**. **Expect:** a "Private key loaded" confirmation popup.
 3. Select the container in the "Secure containers on the selected device" table.
 4. **View Selected File** → the Secure Viewer opens with the real content.
 
 **4.2 Prove the restrictions, live, deliberately**
 With the viewer open:
 - Try **Ctrl+C**, or right-click → **nothing happens** (context menu and clipboard are disabled).
+- If you opened a PDF or image, point out the **zoom in / zoom out / fit-to-window** toolbar at the top of the viewer — content defaults to fit-to-window on open instead of native size, with manual zoom available if you need to check fine detail.
 - Press **Print Screen** → the content **blanks instantly and the viewer closes itself**. This is your strongest visual beat — do it on purpose, and narrate: *"the app can't stop the OS from taking a screenshot, but it can guarantee the screenshot captures nothing and the session ends immediately."*
+
+**4.3 Note: the key unloads itself after every view**
+Closing the viewer — normally, or via a screen-capture trip — automatically clears the loaded private key and its passphrase field. A loaded key is only trusted for the single viewing session it was loaded for, by design. To view anything else, even the same file again, repeat step 4.1's browse-and-load. Don't be caught off guard live: if **View Selected File** looks greyed out after a previous view, this is why.
 
 → *Proves: controlled viewing environment, RAM-only decryption, copy/edit restriction, screen-capture reaction (Requirements 2, 5, 6).*
 
@@ -81,12 +87,14 @@ With the viewer open:
 
 ## Part 5 — One-time access enforcement
 
-**⚠ GAP:** there is currently no UI checkbox to mark a file "one-time access" — `UsagePolicy.one_time_access` defaults to `False` and `EncryptionPage` never sets it. You have two honest options for this requirement:
+The Encrypt File page has a **"One-time access (file is destroyed after first successful view)"** checkbox above **Write Secure Container** — fully live, no code changes needed.
 
-- **Option A (recommended if time allows):** ask me to add the checkbox to the Encrypt File write panel before your review — it's a small change, the service layer already supports it (`store_file(..., usage_policy=...)`).
-- **Option B (no code changes):** don't demo it live. Instead say: *"one-time enforcement is implemented and covered by automated tests"* and show `tests/test_one_time_access_enforcer.py` passing, or open `metadata/one_time_access.py` briefly to show the burn logic.
+1. In **Encrypt File**, choose a fresh test file, **check the one-time-access box**, then **Write Secure Container**.
+2. Go to **Decrypt & View**, browse and load your `.pem` key, select the new container, **View Selected File** — the real content shows, as normal.
+3. Close the viewer. Per the note in 4.3, the key auto-unloads — **browse and load the same key again**, select the same container, **View Selected File** a second time.
+4. **Expect:** the second view silently shows fake content instead of the real file — no error, no indication that anything is different. Narrate: *"the file was consumed by the first legitimate view; a second attempt — from anyone, including me — gets deception, not a denial."*
 
-If Option A is done before your review, the live steps are: enable the checkbox in 3.2 before writing, then repeat Part 4's view steps twice on the same file — the second view shows fake content instead of the real file, silently, with no error.
+→ *Proves: one-time access enforcement (`metadata/one_time_access.py` burn logic), consistent with the deception design in Part 6.*
 
 ---
 
@@ -101,11 +109,11 @@ If Option A is done before your review, the live steps are: enable the checkbox 
 
 → *Proves: Deceptive Protection Mechanism (Requirement 7) and multi-layer validation triggering deception (Requirement 12) — the flagship requirement.*
 
-**6.2 Device mismatch / tampering (optional, needs a second USB or a hex editor)**
+**6.2 Device mismatch / tampering (optional, needs a second USB or a hex editor — but worth doing if you have time, see the payoff below)**
 - *Device mismatch*: write a container on USB A, then plug in USB B and try to open the same `.cusc` file copied there — device-binding check fails, fake content is served.
 - *Tampering*: open the `.cusc` file in a hex editor and flip a few bytes in the middle, then try to view it — HMAC/integrity check fails, fake content is served.
 
-Both are optional flourishes; 6.1 alone fully demonstrates the deception system.
+Both are optional flourishes; 6.1 alone fully demonstrates the deception system. But if you do the tampering variant, go to **Usage Tracking** afterward (Part 7) and point at the **Tampering** column showing a real entry — the event isn't just detected and deceived in the moment, it's independently recorded to the audit log too.
 
 ---
 
@@ -114,7 +122,7 @@ Both are optional flourishes; 6.1 alone fully demonstrates the deception system.
 Now go back to **Dashboard** — the "Recent activity" feed should show your Part 6.1 attempt.
 
 - **Deception Module** page: the wrong-credentials event you just triggered is logged here with its trigger type — this is what proves deception isn't just theoretical, it's independently auditable by whoever controls the machine, even though the attacker never saw it.
-- **Usage Tracking** page: full access log (who, when, granted/denied) + **Verify Log Integrity** button — click it to show the HMAC hash-chain check passing.
+- **Usage Tracking** page: full access log (who, when, granted/denied) + **Verify Log Integrity** button — click it to show the HMAC hash-chain check passing. Its **Tampering** column stays at 0 unless you did the optional 6.2 tampering demo — that's correct, not a bug: it only counts genuine metadata/integrity failures, never device mismatches or reused one-time files.
 - **Access Security** page: account lockout state (failed-attempt counter, lockout status).
 - **Metadata** page: per-file integrity validation status.
 
@@ -132,7 +140,7 @@ Theme toggle (dark/light) and Change Password — quick, show if time allows, no
 
 If a supervisor pushes on "how do we know this really works, not just the UI":
 
-1. **Full test suite**: run `.venv/Scripts/python.exe -m pytest -q` → 713+ tests passing.
+1. **Full test suite**: run `.venv/Scripts/python.exe -m pytest -q` → 769 tests passing, 0 failed, `ruff check .` clean.
 2. **Database is genuinely encrypted**: show the raw `data/crypto_usb.db` file's first bytes in a hex viewer — random ciphertext, not the plaintext `SQLite format 3` header every normal SQLite file starts with.
 3. **Frozen build works too**, not just `python main.py`: mention the app was verified running from a PyInstaller-built `.exe`, with the SQLCipher native library correctly bundled.
 
@@ -142,4 +150,4 @@ If a supervisor pushes on "how do we know this really works, not just the UI":
 
 - **Screen-capture protection is Windows-only and best-effort** (`WDA_EXCLUDEFROMCAPTURE`/`WDA_MONITOR`) — no OS gives a desktop app a way to guarantee this against every capture method (e.g. a phone camera). Documented, not hidden.
 - **The SQLCipher database key is a local machine file, not derived from the user's password** — it can't be, without deadlocking login (you need to open the DB to check the password before you have a password to derive a key from). The credential-derived key from Phase 21 still protects the specific metadata/tracking values on top of this.
-- **One-time access has no UI toggle yet** (see Part 5) — implemented and tested, not yet exposed in the sender UI.
+- **The decrypt-page private key unloads after every view** (see 4.3) — intentional session-scoping, not a bug, but it means Part 5's two-view demo needs the key reloaded between attempts. Don't skip narrating why if a supervisor notices the button greying out.
