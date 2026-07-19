@@ -25,6 +25,7 @@ from core.logger import get_logger
 logger = get_logger(__name__)
 
 _installed = False
+_dialog_open = False
 
 
 def install_excepthook() -> None:
@@ -48,6 +49,14 @@ def install_excepthook() -> None:
             "Unhandled exception reached the top level:\n%s",
             "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
         )
+
+        global _dialog_open
+        if _dialog_open:
+            logger.critical(
+                "A second unhandled exception arrived while the first error dialog was "
+                "still open; logged only, not shown, to avoid stacking modal dialogs."
+            )
+            return
         _show_error_dialog(exc_type, exc_value)
 
     sys.excepthook = _handle
@@ -57,12 +66,14 @@ def _show_error_dialog(exc_type: Type[BaseException], exc_value: BaseException) 
     # Imported lazily: this module must not require Qt to already be
     # initialized just to be imported (e.g. from a non-UI entry point),
     # and a failure constructing the dialog itself must never raise.
+    global _dialog_open
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
 
         app = QApplication.instance()
         if app is None:
             return
+        _dialog_open = True
         QMessageBox.critical(
             None,
             "Unexpected Error",
@@ -71,3 +82,5 @@ def _show_error_dialog(exc_type: Type[BaseException], exc_value: BaseException) 
         )
     except Exception:
         logger.exception("Failed to display the unexpected-error dialog")
+    finally:
+        _dialog_open = False

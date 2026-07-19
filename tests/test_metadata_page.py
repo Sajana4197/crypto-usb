@@ -141,3 +141,30 @@ def test_refresh_reflects_newly_created_records(app, controller, repository, pro
     page.refresh()
 
     assert page.table.rowCount() == 1
+
+
+# -- Automatic polling --------------------------------------------------
+
+
+def test_refresh_timer_is_running_after_construction(app, repository, protection_keys):
+    page = _make_page(app, repository, protection_keys)
+
+    assert page._refresh_timer.isActive() is True
+
+
+def test_refresh_is_a_noop_when_records_are_unchanged(app, controller, repository, protection_keys, monkeypatch):
+    controller.create(
+        file_id="file-1",
+        owner_id="owner-1",
+        wrapped_key=b"wrapped",
+        wrap_algorithm="RSA-OAEP",
+        integrity_hash=compute_integrity_hash(b"content"),
+    )
+    page = _make_page(app, repository, protection_keys)
+
+    calls = []
+    monkeypatch.setattr(page, "_append_row", lambda *a, **k: calls.append(None))
+
+    page.refresh()  # same record as construction -- nothing changed
+
+    assert calls == []

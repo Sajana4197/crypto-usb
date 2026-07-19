@@ -90,3 +90,42 @@ def test_refresh_reflects_newly_registered_account(app, account_repository, auth
     page.refresh()
 
     assert page.table.rowCount() == 1
+
+
+# -- Automatic polling --------------------------------------------------
+
+
+def test_refresh_timer_is_running_after_construction(app, account_repository):
+    page = _make_page(app, account_repository)
+
+    assert page._refresh_timer.isActive() is True
+
+
+def test_refresh_is_a_noop_when_no_account_is_locked_and_unchanged(app, account_repository, auth_controller, monkeypatch):
+    auth_controller.register_password_account("owner-1", "correct-horse-battery")
+    page = _make_page(app, account_repository)
+
+    calls = []
+    monkeypatch.setattr(page, "_append_row", lambda *a, **k: calls.append(None))
+
+    page.refresh()  # same account as construction -- nothing changed, nothing locked
+
+    assert calls == []
+
+
+def test_refresh_always_rebuilds_while_an_account_is_locked(app, account_repository, auth_controller, monkeypatch):
+    """The 'Unlocks In' countdown is a function of wall-clock time, not just
+    the stored account record -- a locked account must keep rebuilding on
+    every poll tick even though the record itself hasn't changed, or the
+    countdown would freeze (see SecurityPage.refresh)."""
+    auth_controller.register_password_account("owner-1", "correct-horse-battery")
+    for _ in range(MAX_FAILED_ATTEMPTS):
+        auth_controller.authenticate_password("owner-1", "wrong-password")
+    page = _make_page(app, account_repository)
+
+    calls = []
+    monkeypatch.setattr(page, "_append_row", lambda *a, **k: calls.append(None))
+
+    page.refresh()  # same locked account, unchanged record -- must still rebuild
+
+    assert calls == [None]

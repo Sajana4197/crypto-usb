@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFrame,
@@ -40,6 +40,7 @@ from tracking.exceptions import TrackingTamperError
 from tracking.models import UsageRecord
 from tracking.tracking_service import UsageTracker
 from ui.pages.base_page import BasePage
+from utils.formatting import format_datetime
 
 logger = get_logger(__name__)
 
@@ -47,6 +48,11 @@ _OK_COLOR = QColor("#3ecf8e")
 _FAIL_COLOR = QColor("#e5484d")
 
 _ACTIVITY_LIMIT = 8
+
+# How often the dashboard polls for new activity without any user action —
+# matches the device-table poll interval used elsewhere (Phase 22/23) so
+# every page feels equally "live".
+_REFRESH_INTERVAL_MS = 2000
 
 
 class DashboardPage(BasePage):
@@ -74,6 +80,7 @@ class DashboardPage(BasePage):
         self._account_repository = account_repository
         self._deception_event_repository = deception_event_repository
         self._usage_tracker = usage_tracker
+        self._last_snapshot: Optional[tuple] = None
 
         self.add_widget(self._build_toolbar())
         self.add_widget(self._build_stats_row())
@@ -89,6 +96,11 @@ class DashboardPage(BasePage):
         self.add_widget(self._build_quick_actions())
 
         self.refresh()
+
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(_REFRESH_INTERVAL_MS)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start()
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -177,6 +189,26 @@ class DashboardPage(BasePage):
 
     def refresh(self) -> None:
         records, tracking_tampered = self._read_tracking_records_safely()
+        # The stat cards can change independently of the tracking log (e.g. a
+        # file was just encrypted but never viewed, so no UsageRecord exists
+        # yet) — the no-op snapshot must cover every value a stat card or the
+        # activity feed reads, not just `records`, or a poll tick would skip
+        # rendering a real change.
+        file_count = (
+            len(self._metadata_repository.list_file_ids()) if self._metadata_repository is not None else None
+        )
+        account_count = (
+            len(self._account_repository.list_owner_ids()) if self._account_repository is not None else None
+        )
+        deception_count = (
+            self._deception_event_repository.count() if self._deception_event_repository is not None else None
+        )
+
+        snapshot = (file_count, account_count, deception_count, tuple(records), tracking_tampered)
+        if snapshot == self._last_snapshot:
+            return
+        self._last_snapshot = snapshot
+
         self._refresh_stats(records, tracking_tampered)
         self._refresh_activity(records)
 
@@ -257,5 +289,5 @@ class DashboardPage(BasePage):
             return
 
         for timestamp, description in entries[:_ACTIVITY_LIMIT]:
-            stamp = timestamp.isoformat(sep=" ", timespec="seconds")
+            stamp = format_datetime(timestamp)
             self.activity_list.addItem(QListWidgetItem(f"{stamp}  ·  {description}"))

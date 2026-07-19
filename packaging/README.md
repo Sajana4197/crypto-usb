@@ -6,26 +6,37 @@ required to run it) and, optionally, a single-file installer.
 ## 1. Build the executable (PyInstaller)
 
 ```powershell
-pip install pyinstaller
+pip install -r requirements-dev.txt   # adds pyinstaller (and ruff) as build-time-only tools
 pyinstaller packaging/crypto_usb.spec --noconfirm --distpath dist --workpath build
 ```
 
 Output: `dist/CryptoUSB/CryptoUSB.exe`, plus its bundled `_internal/`
-directory (PySide6, cryptography, `resources/`, etc.). Run it directly —
-`data/` (SQLite database, `config.json`) and `logs/` are created next to
-the `.exe` on first launch, exactly as they are next to `main.py` when
-running from source.
+directory (PySide6, `cryptography`, `sqlcipher3`'s native extension,
+`resources/` — including the application icon — etc.). Run it directly —
+`data/` (SQLCipher-encrypted `crypto_usb.db`, its `.vault_key` file,
+`config.json`) and `logs/` are created next to the `.exe` on first launch,
+exactly as they are next to `main.py` when running from source.
+
+Note: `build/crypto_usb/CryptoUSB.exe` (the intermediate build step's
+output, *before* `COLLECT` assembles the final `_internal/` folder) is
+**not** a runnable app on its own — it will fail with a "Failed to load
+Python DLL" error if launched directly. Only `dist/CryptoUSB/CryptoUSB.exe`
+is the complete, distributable build; `build/` is safe to delete and is
+regenerated on every run.
 
 This has been built and smoke-tested end to end in this environment: the
 executable launches, reaches the authentication dialog, and correctly
-creates `data/crypto_usb.db` and `logs/app.log` next to itself.
+creates a genuinely SQLCipher-encrypted `data/crypto_usb.db` (verified by
+inspecting the raw file header — random ciphertext, not the plaintext
+`SQLite format 3` magic string every normal SQLite file starts with) and
+`logs/app.log` next to itself.
 
-### Two packaging-specific bugs this build surfaced and fixed
+### Packaging-specific bugs this build surfaced and fixed
 
-Building for real is what caught these — neither was visible running from
-source, and both are now covered by the fixes described below (no
-automated test can exercise a frozen build, so this section is the record
-of that verification):
+Building for real is what caught these — none were visible running from
+source, and all are now covered by the fixes described below (no automated
+test can exercise a frozen build, so this section is the record of that
+verification):
 
 1. **`usb`/PyUSB name collision.** `pyinstaller-hooks-contrib` ships a
    build-time hook *and* a runtime hook for a top-level package named
@@ -44,6 +55,15 @@ of that verification):
    silently failed). Fixed by anchoring to `sys.executable`'s directory
    when `sys.frozen` is set, and to `sys._MEIPASS` specifically for the
    bundled, read-only `resources/` directory.
+3. **`sqlcipher3` native library bundling.** Added when database-file
+   encryption (SQLCipher) was introduced — `sqlcipher3.dbapi2` is a
+   compiled extension module, not pure Python. The spec's `binaries=`
+   uses `collect_dynamic_libs("sqlcipher3")` and `hiddenimports` includes
+   `sqlcipher3.dbapi2` defensively, in case a future wheel links against a
+   separate OpenSSL/SQLCipher DLL instead of a single statically-linked
+   `.pyd`. Verified by actually building and running the frozen `.exe` and
+   confirming the database opens and is genuinely encrypted, not just that
+   the build completes without error.
 
 ## 2. Build the installer (optional, Windows-only tool)
 

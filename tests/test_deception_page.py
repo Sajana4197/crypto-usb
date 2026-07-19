@@ -87,3 +87,25 @@ def test_refresh_reflects_new_activations(app, event_repository):
     page.refresh()
 
     assert page.table.rowCount() == 1
+
+
+# -- Automatic polling --------------------------------------------------
+
+
+def test_refresh_timer_is_running_after_construction(app, event_repository):
+    page = _make_page(app, event_repository)
+
+    assert page._refresh_timer.isActive() is True
+
+
+def test_refresh_is_a_noop_when_events_are_unchanged(app, event_repository, monkeypatch):
+    engine = DeceptionEngine(rng=random.Random(1), event_repository=event_repository)
+    engine.activate(DeceptionTrigger.METADATA_TAMPERING, file_id="file-1")
+    page = _make_page(app, event_repository)
+
+    calls = []
+    monkeypatch.setattr(page, "_append_row", lambda *a, **k: calls.append(None))
+
+    page.refresh()  # same events as construction -- nothing changed
+
+    assert calls == []

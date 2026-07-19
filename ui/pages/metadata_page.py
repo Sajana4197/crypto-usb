@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -30,11 +31,16 @@ from metadata.models import FileMetadata
 from metadata.protection import MetadataProtectionKeys, MetadataProtector
 from metadata.repository import MetadataRepository
 from ui.pages.base_page import BasePage
+from utils.formatting import format_datetime
 
 logger = get_logger(__name__)
 
 _OK_COLOR = QColor("#3ecf8e")
 _FAIL_COLOR = QColor("#e5484d")
+
+# Matches the device-table poll interval used elsewhere (Phase 22/23) so
+# every page feels equally "live".
+_REFRESH_INTERVAL_MS = 2000
 
 _COLUMN_TITLES = (
     "File ID",
@@ -45,10 +51,6 @@ _COLUMN_TITLES = (
     "Device Bound",
     "Expires At",
 )
-
-
-def _fmt(value) -> str:
-    return value.isoformat(sep=" ", timespec="seconds") if value is not None else "—"
 
 
 class MetadataPage(BasePage):
@@ -67,12 +69,19 @@ class MetadataPage(BasePage):
 
         self._metadata_repository = metadata_repository
         self._protection_keys = protection_keys
+        self._last_records: Optional[list[FileMetadata]] = None
+        self._last_tampered = -1
 
         self.add_widget(self._build_toolbar())
         self.add_widget(self._build_table())
         self.add_widget(self._build_status_label())
 
         self.refresh()
+
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(_REFRESH_INTERVAL_MS)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start()
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -113,14 +122,14 @@ class MetadataPage(BasePage):
         return self.status_label
 
     def refresh(self) -> None:
-        self.table.setRowCount(0)
         if self._metadata_repository is None or self._protection_keys is None:
+            self.table.setRowCount(0)
             self.summary_label.setText("No metadata repository is available in this session.")
             return
 
         protector = MetadataProtector(self._protection_keys)
         file_ids = self._metadata_repository.list_file_ids()
-        shown = 0
+        records: list[FileMetadata] = []
         tampered = 0
         for file_id in file_ids:
             protected = self._metadata_repository.load(file_id)
@@ -132,10 +141,21 @@ class MetadataPage(BasePage):
                 tampered += 1
                 logger.warning("Metadata record for file_id=%s failed its integrity check", file_id)
                 continue
-            self._append_row(metadata)
-            shown += 1
+            records.append(metadata)
 
-        summary = f"{shown} record(s)"
+        # Skip the rebuild when nothing actually changed — a background poll
+        # should never reset the table's scroll position while a record set
+        # is unchanged (same principle as DevicePage._refresh_devices).
+        if records == self._last_records and tampered == self._last_tampered:
+            return
+        self._last_records = records
+        self._last_tampered = tampered
+
+        self.table.setRowCount(0)
+        for metadata in records:
+            self._append_row(metadata)
+
+        summary = f"{len(records)} record(s)"
         if tampered:
             summary += f" · {tampered} failed integrity check"
         self.summary_label.setText(summary)
@@ -146,11 +166,11 @@ class MetadataPage(BasePage):
         values = (
             QTableWidgetItem(metadata.file_id),
             QTableWidgetItem(metadata.owner_id),
-            QTableWidgetItem(_fmt(metadata.created_at)),
+            QTableWidgetItem(format_datetime(metadata.created_at)),
             QTableWidgetItem(str(metadata.access_count)),
             QTableWidgetItem("Yes" if metadata.usage_policy.one_time_access else "No"),
             QTableWidgetItem("Yes" if metadata.device_binding.bound else "No"),
-            QTableWidgetItem(_fmt(metadata.expiry_rules.expires_at)),
+            QTableWidgetItem(format_datetime(metadata.expiry_rules.expires_at)),
         )
         for column, cell in enumerate(values):
             self.table.setItem(row, column, cell)

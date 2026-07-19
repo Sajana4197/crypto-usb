@@ -131,9 +131,11 @@ def test_verify_integrity_success_pops_up_result(app, tracker, mock_result_popup
 def test_verify_integrity_failure_pops_up_result(app, tracker, connection, mock_result_popup):
     record = tracker.start_session(user="alice", machine_id="m", file_id="file-1")
     tracker.record_close(record)
-    # Constructed before the row is tampered with -- TrackingPage.__init__
-    # calls refresh(), which decrypts every record and would itself raise
-    # on a tampered row rather than reporting a pass/fail result.
+    # Constructed before the row is tampered with, then tampered after --
+    # refresh() (called by __init__ and by every poll tick) now survives a
+    # tampered row itself (see test_refresh_survives_tampered_log_without_crashing),
+    # but _on_verify_clicked() below is what's actually under test here: it
+    # must report FAILED, not silently skip, when integrity verification fails.
     page = _make_page(app, tracker)
 
     cur = connection.execute("SELECT id, ciphertext FROM usage_log WHERE id = 1")
@@ -173,3 +175,46 @@ def test_verify_integrity_without_tracker_does_not_pop_up(app, mock_result_popup
     page = _make_page(app)
     page._on_verify_clicked()
     mock_result_popup.assert_not_called()
+
+
+# -- Automatic polling --------------------------------------------------
+
+
+def test_refresh_timer_is_running_after_construction(app, tracker):
+    page = _make_page(app, tracker)
+
+    assert page._refresh_timer.isActive() is True
+
+
+def test_refresh_is_a_noop_when_records_are_unchanged(app, tracker, monkeypatch):
+    record = tracker.start_session(user="alice", machine_id="m", file_id="file-1")
+    tracker.record_close(record)
+    page = _make_page(app, tracker)
+
+    calls = []
+    monkeypatch.setattr(page, "_append_row", lambda *a, **k: calls.append(None))
+
+    page.refresh()  # same record as construction -- nothing changed
+
+    assert calls == []
+
+
+def test_refresh_survives_tampered_log_without_crashing(app, tracker, connection):
+    """A poll tick calls refresh() automatically, unlike the old
+    click-to-refresh-only design -- it must survive a log tampered after
+    construction the same way DashboardPage's tracking stat already does,
+    not raise TrackingTamperError out of the QTimer callback."""
+    record = tracker.start_session(user="alice", machine_id="m", file_id="file-1")
+    tracker.record_close(record)
+    page = _make_page(app, tracker)
+
+    cur = connection.execute("SELECT id, ciphertext FROM usage_log WHERE id = 1")
+    row_id, ciphertext = cur.fetchone()
+    tampered = bytearray(ciphertext)
+    tampered[0] ^= 0xFF
+    connection.execute("UPDATE usage_log SET ciphertext = ? WHERE id = ?", (bytes(tampered), row_id))
+    connection.commit()
+
+    page.refresh()  # must not raise
+
+    assert "failed its integrity check" in page.summary_label.text().lower()

@@ -250,3 +250,40 @@ def test_refresh_reflects_newly_added_data(app, metadata_controller, metadata_re
     assert page.files_value_label.text() == "1"
 
 
+# -- Automatic polling --------------------------------------------------
+
+
+def test_refresh_timer_is_running_after_construction(app):
+    page = _make_page(app)
+
+    assert page._refresh_timer.isActive() is True
+
+
+def test_refresh_is_a_noop_when_nothing_changed(app, metadata_controller, metadata_repository, monkeypatch):
+    _create_metadata_record(metadata_controller, file_id="file-1")
+    page = _make_page(app, metadata_repository=metadata_repository)
+
+    calls = []
+    monkeypatch.setattr(page, "_refresh_stats", lambda *a, **k: calls.append("stats"))
+    monkeypatch.setattr(page, "_refresh_activity", lambda *a, **k: calls.append("activity"))
+
+    page.refresh()  # same data as construction -- nothing changed
+
+    assert calls == []
+
+
+def test_refresh_rebuilds_when_file_count_changes_with_no_tracking_activity(
+    app, metadata_controller, metadata_repository
+):
+    """A file can be encrypted without ever being viewed, so no UsageRecord
+    exists -- the no-op snapshot must still catch this via the file count,
+    not just the tracking log (see DashboardPage.refresh)."""
+    page = _make_page(app, metadata_repository=metadata_repository)
+    assert page.files_value_label.text() == "0"
+
+    _create_metadata_record(metadata_controller, file_id="file-1")
+    page.refresh()
+
+    assert page.files_value_label.text() == "1"
+
+

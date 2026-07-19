@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -26,15 +27,21 @@ from PySide6.QtWidgets import (
 )
 
 from core.logger import get_logger
+from tracking.exceptions import TrackingTamperError
 from tracking.models import UsageRecord
 from tracking.tracking_service import UsageTracker
 from ui.pages.base_page import BasePage
 from ui.widgets.busy import show_result_popup
+from utils.formatting import format_datetime
 
 logger = get_logger(__name__)
 
 _OK_COLOR = QColor("#3ecf8e")
 _FAIL_COLOR = QColor("#e5484d")
+
+# Matches the device-table poll interval used elsewhere (Phase 22/23) so
+# every page feels equally "live".
+_REFRESH_INTERVAL_MS = 2000
 
 _COLUMN_TITLES = (
     "Session",
@@ -49,10 +56,6 @@ _COLUMN_TITLES = (
     "Screen Captures",
     "Tampering",
 )
-
-
-def _fmt(value) -> str:
-    return value.isoformat(sep=" ", timespec="seconds") if value is not None else "—"
 
 
 def _bool_display(value: Optional[bool]) -> str:
@@ -71,13 +74,22 @@ class TrackingPage(BasePage):
         )
 
         self._usage_tracker = usage_tracker
-        self._records: list[UsageRecord] = []
+        # None, not [], is "never refreshed yet" — otherwise a fresh account
+        # with zero real records would see `[] == []` on the very first
+        # refresh() call and skip rendering the summary label entirely
+        # (same class of bug fixed in DevicePage._refresh_devices).
+        self._records: Optional[list[UsageRecord]] = None
 
         self.add_widget(self._build_toolbar())
         self.add_widget(self._build_table())
         self.add_widget(self._build_status_label())
 
         self.refresh()
+
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(_REFRESH_INTERVAL_MS)
+        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.start()
 
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
@@ -128,7 +140,26 @@ class TrackingPage(BasePage):
             self.table.setRowCount(0)
             return
 
-        self._records = list(reversed(self._usage_tracker.read_all_records()))
+        try:
+            records = list(reversed(self._usage_tracker.read_all_records()))
+        except TrackingTamperError as exc:
+            # `read_all_records()` decrypts and HMAC-verifies every entry,
+            # raising on the first one that fails — a poll tick must survive
+            # this the same way a manual refresh would (see DashboardPage
+            # ._read_tracking_records_safely), not crash the timer callback.
+            logger.warning("Usage log record(s) failed integrity check: %s", exc)
+            self._records = []
+            self.table.setRowCount(0)
+            self.summary_label.setText("Usage log failed its integrity check — see Verify Log Integrity.")
+            return
+
+        # Skip the rebuild when nothing actually changed — a background poll
+        # should never reset the table's scroll position while the record
+        # set is unchanged (same principle as DevicePage._refresh_devices).
+        if records == self._records:
+            return
+        self._records = records
+
         self.table.setRowCount(0)
         for record in self._records:
             self._append_row(record)
@@ -148,9 +179,9 @@ class TrackingPage(BasePage):
             QTableWidgetItem(record.session_id[:8]),
             QTableWidgetItem(record.user),
             QTableWidgetItem(record.file_id),
-            QTableWidgetItem(_fmt(record.login_time)),
-            QTableWidgetItem(_fmt(record.open_time)),
-            QTableWidgetItem(_fmt(record.close_time)),
+            QTableWidgetItem(format_datetime(record.login_time)),
+            QTableWidgetItem(format_datetime(record.open_time)),
+            QTableWidgetItem(format_datetime(record.close_time)),
             QTableWidgetItem(f"{record.duration_seconds:.3f}" if record.duration_seconds is not None else "—"),
             auth_item,
             validation_item,

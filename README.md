@@ -7,43 +7,71 @@ key invalidation, a deception module, usage tracking, and RAM-only decryption.
 
 ## Status
 
-**All 17 phases are complete.** The write side (Device Validation page:
-encrypt a file, wrap its key, store it as a `.cusc` secure container bound to
-a specific USB device) and the read side (Decrypt & View page: authenticate,
-validate, decrypt strictly in RAM, view once) share the same metadata
-repository, protection keys, and usage tracker, so a file written by one page
-can be validated and read back by the other end to end. Phase 15 hardened,
-polished, and packaged the application for demonstration; Phase 16 added
-read-only dashboard pages (Metadata, Access Security, Deception Module,
-Usage Tracking) over data that was already being correctly recorded; Phase
-17 then added in-app password change and one-time-recovery-code password
-reset for password accounts — see `REQUIREMENTS.md` for the full
-requirement-by-requirement traceability table, the Phase 17 write-up, and
-security review notes.
+**Feature-complete against every proposal requirement, with no known gaps.**
+The sender side (**Encrypt File** page: validate a device, encrypt a file,
+wrap its key, export the key pair, store it as a `.cusc` secure container
+bound to that device) and the receiver side (**Decrypt & View** page:
+authenticate, load the key, validate, decrypt strictly in RAM, view once)
+share the same metadata repository, protection keys, and usage tracker, so a
+file written on one side can be validated and read back on the other end to
+end. **Device Validation** is a separate, standalone device-health check —
+validating a device and writing to one are independent operations, not a
+sequential gate.
 
-Implemented modules (see the in-app Dashboard for the same list):
+Beyond the core write/read workflow, the project also implements:
 
-- Hybrid Encryption (AES-256-GCM + RSA/ECC key wrapping)
+- **Deception as a first-class security layer, not just a slogan** — wrong
+  login credentials silently grant a decoy session that serves fabricated
+  content for every subsequent action, indistinguishable from success to an
+  attacker; device mismatch, metadata tampering, and one-time-access reuse
+  are independently detected and deceived the same way. Every trigger is
+  recorded to an audit trail the legitimate operator can review (Deception
+  Module page), even though the attacker never sees anything is wrong.
+- **Two-layer storage encryption** — the SQLite database file itself is
+  SQLCipher-encrypted at rest (a locally-generated, machine-resident key,
+  since the account table must be readable before login can even check a
+  password), and on top of that, the specific metadata/usage-log protection
+  keys are further wrapped under a key derived from the authenticated user's
+  own credentials via scrypt — so even someone with both the raw database
+  file and its file-level key still can't read protected records without
+  the correct password or private key.
+- **Live, auto-refreshing dashboards** — Dashboard, Metadata, Access
+  Security, Deception Module, and Usage Tracking all poll their underlying
+  repositories every 2 seconds, so activity started from any other page
+  shows up automatically, without a manual refresh.
+- **A hardened secure viewer** — RAM-only decryption, disabled
+  copy/paste/print/context-menu, zoom in/out/fit-to-window controls, and a
+  Print Screen reaction that blanks and closes the viewer immediately
+  (detection-only is a genuine platform limit on Windows — this reacts as
+  fast as the platform allows rather than merely logging it).
+
+See `REQUIREMENTS.md` for the full requirement-by-requirement traceability
+table and write-ups of every phase, and `DEMO_GUIDE.md` for a click-by-click
+walkthrough of every feature mapped to the requirement it proves.
+
+Implemented modules (see the in-app Dashboard for live counts of these):
+
+- Hybrid Encryption (AES-256-GCM + RSA key wrapping)
 - Metadata-Driven Access Control
 - Device Validation (USB + machine fingerprinting)
-- Secure Storage Layer (encrypted `.cusc` containers)
-- User Authentication (password and private-key)
+- Secure Storage Layer (encrypted `.cusc` containers, SQLCipher-encrypted database)
+- User Authentication (password and private-key, with deception on wrong credentials)
 - Validation Engine (device, integrity, tampering checks)
-- One-Time Access Enforcement
+- One-Time Access Enforcement (with a UI toggle on the sender side)
 - Key Invalidation (crypto-shredding)
 - RAM-Only Decryption
-- Secure Controlled Viewer
-- Deception Module (indistinguishable decoy responses on repeat/invalid access)
-- Usage Tracking (tamper-evident access log)
+- Secure Controlled Viewer (zoom, copy/print lockdown, screen-capture reaction)
+- Deception Module (indistinguishable decoy responses on repeat/invalid/unauthorized access)
+- Usage Tracking (tamper-evident access log, including tampering-event recording)
 - Secure Cleanup (RAM/key wiping on success, failure, or exit)
 - Full Workflow Integration
 
-631 automated tests pass (`pytest`), spanning unit, integration, UI-level,
-and end-to-end demo-script coverage. Every navigation page is now a real,
-working view — see "UI status (Phase 16)" in `REQUIREMENTS.md` for exactly
-what each dashboard shows. `ui/pages/encryption_page.py` remains an orphaned
-file-queue preview (`ui/pages/device_page.py` is the actual working
-write-side page) — the one documented, intentional exception.
+788 automated tests pass (`pytest`, single process, no batching required),
+spanning unit, integration, UI-level, and end-to-end demo-script coverage,
+plus a clean `ruff check .`. Every navigation page is a real, working view —
+`ui/pages/encryption_page.py` is the actual sender workflow (not a stub);
+`ui/pages/device_page.py` is a standalone device-validation utility with no
+write path of its own.
 
 ## Requirements
 
@@ -95,19 +123,25 @@ ui/             PySide6 UI: main window, theme manager, navigation, pages, busy/
 utils/          Shared utility helpers (path resolution)
 resources/      Icons and static assets
 packaging/      PyInstaller spec + Inno Setup installer script (see packaging/README.md)
-tests/          Automated tests (553 passing)
+tests/          Automated tests (788 passing)
 REQUIREMENTS.md Requirement-by-requirement traceability + security review notes
+DEMO_GUIDE.md   Step-by-step demonstration script, every feature mapped to the requirement it proves
 ```
 
 ## Data locations
 
-- SQLite database: `data/crypto_usb.db`
+- SQLite database (SQLCipher-encrypted): `data/crypto_usb.db`
+- Database file-encryption key: `data/.vault_key`
 - Application config: `data/config.json`
 - Logs: `logs/app.log`
 
 Both `data/` and `logs/` are created automatically at runtime next to
 `main.py` (or next to the installed `.exe` in a packaged build — see
-`packaging/README.md`) and are git-ignored.
+`packaging/README.md`) and are git-ignored. Deleting `data/` resets the
+application to a fresh first-run state (no accounts, no stored files) —
+useful for a clean demo, but note that any `.cusc` containers already
+written to a USB device remain on that device and cannot be decrypted again
+once their protection keys are gone.
 
 ## Packaging
 
