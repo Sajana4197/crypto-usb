@@ -9,6 +9,10 @@ import os
 from app.protection_keys import (
     load_or_create_metadata_protection_keys,
     load_or_create_tracking_protection_keys,
+    unwrap_vault_master_key_via_password,
+    unwrap_vault_master_key_via_recovery,
+    wrap_vault_master_key_for_password,
+    wrap_vault_master_key_for_recovery,
 )
 from database.db_manager import DatabaseManager
 
@@ -104,5 +108,70 @@ def test_tracking_keys_wrong_vault_key_falls_back_to_fresh_keys(tmp_path, monkey
 
         assert regenerated.encryption_key != original.encryption_key
         assert regenerated.hmac_key != original.hmac_key
+    finally:
+        db_manager.close()
+
+
+# -- Vault Master Key indirection -----------------------------------------
+
+
+def test_vault_master_key_unwraps_via_password_slot_after_first_use(tmp_path, monkeypatch):
+    db_manager = _db_manager(tmp_path, monkeypatch)
+    try:
+        load_or_create_metadata_protection_keys(db_manager, VAULT_KEY)
+
+        vmk = unwrap_vault_master_key_via_password(db_manager, VAULT_KEY)
+        assert vmk is not None
+        assert len(vmk) == 32
+    finally:
+        db_manager.close()
+
+
+def test_vault_master_key_recovery_slot_absent_until_populated(tmp_path, monkeypatch):
+    db_manager = _db_manager(tmp_path, monkeypatch)
+    try:
+        load_or_create_metadata_protection_keys(db_manager, VAULT_KEY)
+
+        assert unwrap_vault_master_key_via_recovery(db_manager, os.urandom(32)) is None
+    finally:
+        db_manager.close()
+
+
+def test_vault_master_key_recovery_slot_round_trip(tmp_path, monkeypatch):
+    db_manager = _db_manager(tmp_path, monkeypatch)
+    try:
+        load_or_create_metadata_protection_keys(db_manager, VAULT_KEY)
+        vmk = unwrap_vault_master_key_via_password(db_manager, VAULT_KEY)
+
+        recovery_key = os.urandom(32)
+        wrap_vault_master_key_for_recovery(db_manager, vmk, recovery_key)
+
+        assert unwrap_vault_master_key_via_recovery(db_manager, recovery_key) == vmk
+    finally:
+        db_manager.close()
+
+
+def test_password_rotation_preserves_protection_keys_when_vmk_is_rewrapped(tmp_path, monkeypatch):
+    """The core fix this indirection exists for: rewrapping the VMK into
+    a new password slot (what a correct password-change flow does)
+    keeps the already-encrypted metadata/tracking protection keys
+    readable under the new vault key — unlike wrapping directly under
+    the vault key, which orphans them on every rotation."""
+    db_manager = _db_manager(tmp_path, monkeypatch)
+    try:
+        original_metadata = load_or_create_metadata_protection_keys(db_manager, VAULT_KEY)
+        original_tracking = load_or_create_tracking_protection_keys(db_manager, VAULT_KEY)
+        vmk = unwrap_vault_master_key_via_password(db_manager, VAULT_KEY)
+
+        new_vault_key = os.urandom(32)
+        wrap_vault_master_key_for_password(db_manager, vmk, new_vault_key)
+
+        rotated_metadata = load_or_create_metadata_protection_keys(db_manager, new_vault_key)
+        rotated_tracking = load_or_create_tracking_protection_keys(db_manager, new_vault_key)
+
+        assert rotated_metadata.encryption_key == original_metadata.encryption_key
+        assert rotated_metadata.hmac_key == original_metadata.hmac_key
+        assert rotated_tracking.encryption_key == original_tracking.encryption_key
+        assert rotated_tracking.hmac_key == original_tracking.hmac_key
     finally:
         db_manager.close()

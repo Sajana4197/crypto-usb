@@ -5,10 +5,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.protection_keys import (
+    load_or_create_metadata_protection_keys,
+    load_or_create_tracking_protection_keys,
+    unwrap_vault_master_key_via_password,
+    unwrap_vault_master_key_via_recovery,
+)
 from crypto import rsa_keypair
 from crypto.secure_cleanup import CleanupReason
+from database.db_manager import DatabaseManager
 from deception.deception_engine import DeceptionEngine
 from deception.triggers import DeceptionTrigger
+from security import password_hasher
 from security.account_repository import AccountRepository
 from security.auth_controller import AuthController
 from security.exceptions import (
@@ -28,6 +36,20 @@ PASSPHRASE = b"strong-passphrase-1"
 def controller():
     conn = sqlite3.connect(":memory:")
     return AuthController(AccountRepository(conn))
+
+
+@pytest.fixture
+def db_manager(tmp_path, monkeypatch):
+    monkeypatch.setattr("database.db_manager.get_database_path", lambda: tmp_path / "db.sqlite")
+    manager = DatabaseManager()
+    manager.initialize()
+    yield manager
+    manager.close()
+
+
+@pytest.fixture
+def controller_with_db(db_manager):
+    return AuthController(AccountRepository(db_manager.connect()), db_manager=db_manager)
 
 
 @pytest.fixture
@@ -456,3 +478,201 @@ def test_reset_password_with_recovery_code_is_single_use(controller):
     # ...but the newly issued one does.
     controller.reset_password_with_recovery_code("owner-1", new_recovery_code, "another-password")
     controller.authenticate_password("owner-1", "another-password")
+
+
+# -- Vault Master Key establishment (Phase 2) -----------------------------
+
+
+def test_register_password_account_without_db_manager_does_not_raise(controller):
+    # `controller` has no `db_manager`; registration must still work exactly
+    # as before, just without establishing a Vault Master Key.
+    controller.register_password_account("owner-1", "correct-password")
+
+
+def test_register_password_account_establishes_vault_master_key(controller_with_db, db_manager):
+    account, recovery_code = controller_with_db.register_password_account("owner-1", "correct-password")
+
+    assert account.credential.key_wrap_salt is not None
+    assert account.recovery_code_hash.key_wrap_salt is not None
+
+    vault_key = password_hasher.derive_vault_key("correct-password", account.credential.key_wrap_salt)
+    recovery_key = password_hasher.derive_recovery_key(
+        recovery_code, account.recovery_code_hash.key_wrap_salt
+    )
+
+    vmk_via_password = unwrap_vault_master_key_via_password(db_manager, vault_key)
+    vmk_via_recovery = unwrap_vault_master_key_via_recovery(db_manager, recovery_key)
+
+    assert vmk_via_password is not None
+    assert vmk_via_password == vmk_via_recovery
+
+
+# -- Vault Master Key rewrap on password change (Phase 3) -----------------
+
+
+def _vault_key_for(account, password):
+    return password_hasher.derive_vault_key(password, account.credential.key_wrap_salt)
+
+
+def test_change_password_preserves_metadata_and_tracking_protection_keys(controller_with_db, db_manager):
+    """Regression test for the reported bug: after a password change, the
+    tamper-evident usage log must still verify against the same HMAC key
+    -- changing the password must not silently mint new protection keys
+    and orphan everything already encrypted/HMAC'd under the old ones."""
+    account, _recovery_code = controller_with_db.register_password_account("owner-1", "correct-password")
+    old_vault_key = _vault_key_for(account, "correct-password")
+    original_metadata = load_or_create_metadata_protection_keys(db_manager, old_vault_key)
+    original_tracking = load_or_create_tracking_protection_keys(db_manager, old_vault_key)
+
+    account, _new_recovery_code = controller_with_db.change_password(
+        "owner-1", "correct-password", "new-correct-password"
+    )
+    new_vault_key = _vault_key_for(account, "new-correct-password")
+
+    rotated_metadata = load_or_create_metadata_protection_keys(db_manager, new_vault_key)
+    rotated_tracking = load_or_create_tracking_protection_keys(db_manager, new_vault_key)
+
+    assert rotated_metadata.encryption_key == original_metadata.encryption_key
+    assert rotated_metadata.hmac_key == original_metadata.hmac_key
+    assert rotated_tracking.encryption_key == original_tracking.encryption_key
+    assert rotated_tracking.hmac_key == original_tracking.hmac_key
+
+
+def test_change_password_updates_recovery_slot_to_new_code(controller_with_db, db_manager):
+    account, _recovery_code = controller_with_db.register_password_account("owner-1", "correct-password")
+
+    account, new_recovery_code = controller_with_db.change_password(
+        "owner-1", "correct-password", "new-correct-password"
+    )
+
+    new_vault_key = _vault_key_for(account, "new-correct-password")
+    new_recovery_key = password_hasher.derive_recovery_key(
+        new_recovery_code, account.recovery_code_hash.key_wrap_salt
+    )
+
+    vmk_via_password = unwrap_vault_master_key_via_password(db_manager, new_vault_key)
+    vmk_via_recovery = unwrap_vault_master_key_via_recovery(db_manager, new_recovery_key)
+
+    assert vmk_via_password is not None
+    assert vmk_via_password == vmk_via_recovery
+
+
+def test_change_password_without_db_manager_does_not_raise(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    # `controller` has no `db_manager`; must behave exactly as before.
+    controller.change_password("owner-1", "correct-password", "new-correct-password")
+
+
+# -- Vault Master Key rewrap on recovery-code reset (Phase 4) -------------
+
+
+def test_reset_password_with_recovery_code_preserves_metadata_and_tracking_protection_keys(
+    controller_with_db, db_manager
+):
+    """This is the exact scenario originally reported: resetting the
+    password via the forgotten-password/recovery-code flow (no old
+    password known) must still leave the tamper-evident usage log
+    verifiable afterwards, not show a false "HMAC mismatch" because a
+    fresh, unrelated tracking key got minted on next login."""
+    account, recovery_code = controller_with_db.register_password_account("owner-1", "correct-password")
+    old_vault_key = _vault_key_for(account, "correct-password")
+    original_metadata = load_or_create_metadata_protection_keys(db_manager, old_vault_key)
+    original_tracking = load_or_create_tracking_protection_keys(db_manager, old_vault_key)
+
+    account, _new_recovery_code = controller_with_db.reset_password_with_recovery_code(
+        "owner-1", recovery_code, "new-correct-password"
+    )
+    new_vault_key = _vault_key_for(account, "new-correct-password")
+
+    rotated_metadata = load_or_create_metadata_protection_keys(db_manager, new_vault_key)
+    rotated_tracking = load_or_create_tracking_protection_keys(db_manager, new_vault_key)
+
+    assert rotated_metadata.encryption_key == original_metadata.encryption_key
+    assert rotated_metadata.hmac_key == original_metadata.hmac_key
+    assert rotated_tracking.encryption_key == original_tracking.encryption_key
+    assert rotated_tracking.hmac_key == original_tracking.hmac_key
+
+
+def test_reset_password_with_recovery_code_updates_recovery_slot_to_new_code(controller_with_db, db_manager):
+    account, recovery_code = controller_with_db.register_password_account("owner-1", "correct-password")
+
+    account, new_recovery_code = controller_with_db.reset_password_with_recovery_code(
+        "owner-1", recovery_code, "new-correct-password"
+    )
+
+    new_vault_key = _vault_key_for(account, "new-correct-password")
+    new_recovery_key = password_hasher.derive_recovery_key(
+        new_recovery_code, account.recovery_code_hash.key_wrap_salt
+    )
+
+    vmk_via_password = unwrap_vault_master_key_via_password(db_manager, new_vault_key)
+    vmk_via_recovery = unwrap_vault_master_key_via_recovery(db_manager, new_recovery_key)
+
+    assert vmk_via_password is not None
+    assert vmk_via_password == vmk_via_recovery
+
+
+def test_reset_password_with_recovery_code_old_recovery_key_no_longer_unlocks_vmk(controller_with_db, db_manager):
+    """Confirms the recovery slot actually rotates -- the old, now-spent
+    recovery code must not still be able to unlock the VMK afterwards."""
+    account, recovery_code = controller_with_db.register_password_account("owner-1", "correct-password")
+    old_recovery_key = password_hasher.derive_recovery_key(recovery_code, account.recovery_code_hash.key_wrap_salt)
+
+    controller_with_db.reset_password_with_recovery_code("owner-1", recovery_code, "new-correct-password")
+
+    assert unwrap_vault_master_key_via_recovery(db_manager, old_recovery_key) is None
+
+
+def test_reset_password_with_recovery_code_without_db_manager_does_not_raise(controller):
+    _account, recovery_code = controller.register_password_account("owner-1", "correct-password")
+
+    # `controller` has no `db_manager`; must behave exactly as before.
+    controller.reset_password_with_recovery_code("owner-1", recovery_code, "new-correct-password")
+
+
+# -- Legacy (pre-VMK) account self-heal ------------------------------------
+
+
+def _make_legacy_account(controller_with_db):
+    """Simulate an account created before Phase 1: no `key_wrap_salt` on
+    either the credential or the recovery-code hash, and no VMK/slots
+    ever established, matching what a pre-fix install's `app_meta` and
+    `accounts` rows would actually look like."""
+    account, recovery_code = controller_with_db.register_password_account("owner-1", "correct-password")
+    account.credential.key_wrap_salt = None
+    account.recovery_code_hash.key_wrap_salt = None
+    controller_with_db._repository.save(account)
+    return recovery_code
+
+
+def test_change_password_on_legacy_account_does_not_raise_and_establishes_vmk(controller_with_db, db_manager):
+    _recovery_code = _make_legacy_account(controller_with_db)
+
+    account, new_recovery_code = controller_with_db.change_password(
+        "owner-1", "correct-password", "new-correct-password"
+    )
+
+    new_vault_key = _vault_key_for(account, "new-correct-password")
+    new_recovery_key = password_hasher.derive_recovery_key(
+        new_recovery_code, account.recovery_code_hash.key_wrap_salt
+    )
+    assert unwrap_vault_master_key_via_password(db_manager, new_vault_key) is not None
+    assert unwrap_vault_master_key_via_recovery(db_manager, new_recovery_key) is not None
+
+
+def test_reset_password_with_recovery_code_on_legacy_account_does_not_raise_and_establishes_vmk(
+    controller_with_db, db_manager
+):
+    recovery_code = _make_legacy_account(controller_with_db)
+
+    account, new_recovery_code = controller_with_db.reset_password_with_recovery_code(
+        "owner-1", recovery_code, "new-correct-password"
+    )
+
+    new_vault_key = _vault_key_for(account, "new-correct-password")
+    new_recovery_key = password_hasher.derive_recovery_key(
+        new_recovery_code, account.recovery_code_hash.key_wrap_salt
+    )
+    assert unwrap_vault_master_key_via_password(db_manager, new_vault_key) is not None
+    assert unwrap_vault_master_key_via_recovery(db_manager, new_recovery_key) is not None

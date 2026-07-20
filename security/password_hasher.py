@@ -89,6 +89,18 @@ def derive_vault_key_from_bytes(secret: bytes, salt: bytes) -> bytes:
     return kdf.derive(secret)
 
 
+def derive_recovery_key(recovery_code: str, salt: bytes) -> bytes:
+    """Derive the key that unlocks the Vault Master Key's recovery slot
+    (see `app.protection_keys`) from a plaintext recovery code and its
+    dedicated wrap salt (stored as `key_wrap_salt` on the recovery
+    code's own `PasswordCredential`). Same scrypt cost parameters as
+    `derive_vault_key`, but keyed off the recovery code instead of the
+    password, so a recovery-code reset can unlock the same underlying
+    protection keys a password-derived vault key would.
+    """
+    return _derive(recovery_code, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, KEY_LEN_BYTES)
+
+
 def generate_recovery_code() -> str:
     """A fresh random recovery code, e.g. for showing once at registration."""
     return "".join(secrets.choice(_RECOVERY_CODE_ALPHABET) for _ in range(RECOVERY_CODE_LENGTH))
@@ -96,11 +108,18 @@ def generate_recovery_code() -> str:
 
 def hash_recovery_code(recovery_code: str) -> PasswordCredential:
     """Hash `recovery_code` under a fresh random salt, using the same scrypt
-    scheme as `hash_password` — the plaintext is never stored.
+    scheme as `hash_password` — the plaintext is never stored. Also
+    generates a `key_wrap_salt` (unused for verification, mirroring
+    `hash_password`'s) for `derive_recovery_key` to use as the recovery
+    slot's independent KDF salt.
     """
     salt = os.urandom(SALT_LEN_BYTES)
     digest = _derive(recovery_code, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P, KEY_LEN_BYTES)
-    return PasswordCredential(salt=salt, digest=digest, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, key_len=KEY_LEN_BYTES)
+    key_wrap_salt = os.urandom(SALT_LEN_BYTES)
+    return PasswordCredential(
+        salt=salt, digest=digest, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, key_len=KEY_LEN_BYTES,
+        key_wrap_salt=key_wrap_salt,
+    )
 
 
 def verify_recovery_code(recovery_code: str, credential: PasswordCredential) -> bool:

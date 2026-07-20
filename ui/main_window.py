@@ -83,7 +83,9 @@ class MainWindow(QMainWindow):
 
         current_session = self.session_manager.current if self.session_manager else None
         current_owner_id = current_session.owner_id if current_session else None
-        auth_controller = AuthController(account_repository) if account_repository is not None else None
+        auth_controller = (
+            AuthController(account_repository, db_manager=self.db_manager) if account_repository is not None else None
+        )
 
         self.settings_page = SettingsPage(
             current_theme=theme_manager.current_theme,

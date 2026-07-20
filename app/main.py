@@ -62,7 +62,7 @@ def bootstrap() -> tuple[QApplication, Optional[MainWindow]]:
     deception_engine = DeceptionEngine(event_repository=deception_event_repository)
 
     account_repository = AccountRepository(db_manager.connect())
-    auth_controller = AuthController(account_repository, deception_engine=deception_engine)
+    auth_controller = AuthController(account_repository, deception_engine=deception_engine, db_manager=db_manager)
     session_manager = SessionManager()
 
     auth_dialog = AuthDialog(auth_controller, owner_id=LOCAL_OWNER_ID)

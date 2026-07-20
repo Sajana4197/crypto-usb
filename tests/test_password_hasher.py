@@ -8,6 +8,7 @@ from security.password_hasher import (
     MIN_PASSWORD_LENGTH,
     RECOVERY_CODE_LENGTH,
     SALT_LEN_BYTES,
+    derive_recovery_key,
     derive_vault_key,
     derive_vault_key_from_bytes,
     generate_recovery_code,
@@ -154,3 +155,49 @@ def test_hash_recovery_code_uses_random_salt():
     b = hash_recovery_code(code)
     assert a.salt != b.salt
     assert a.digest != b.digest
+
+
+def test_hash_recovery_code_generates_key_wrap_salt():
+    credential = hash_recovery_code(generate_recovery_code())
+    assert credential.key_wrap_salt is not None
+    assert len(credential.key_wrap_salt) == SALT_LEN_BYTES
+
+
+def test_hash_recovery_code_key_wrap_salt_is_random():
+    code = generate_recovery_code()
+    a = hash_recovery_code(code)
+    b = hash_recovery_code(code)
+    assert a.key_wrap_salt != b.key_wrap_salt
+
+
+# -- Recovery key derivation ---------------------------------------------
+
+
+def test_derive_recovery_key_round_trip():
+    code = generate_recovery_code()
+    salt = hash_recovery_code(code).key_wrap_salt
+    a = derive_recovery_key(code, salt)
+    b = derive_recovery_key(code, salt)
+    assert a == b
+    assert len(a) == KEY_LEN_BYTES
+
+
+def test_derive_recovery_key_differs_by_salt():
+    code = generate_recovery_code()
+    a = derive_recovery_key(code, b"\x01" * SALT_LEN_BYTES)
+    b = derive_recovery_key(code, b"\x02" * SALT_LEN_BYTES)
+    assert a != b
+
+
+def test_derive_recovery_key_differs_by_code():
+    salt = b"\x05" * SALT_LEN_BYTES
+    a = derive_recovery_key("FIRST-RECOVERY-CODE-VALUE", salt)
+    b = derive_recovery_key("SECOND-RECOVERY-CODE-VALUE", salt)
+    assert a != b
+
+
+def test_derive_recovery_key_differs_from_recovery_code_digest():
+    code = generate_recovery_code()
+    credential = hash_recovery_code(code)
+    recovery_key = derive_recovery_key(code, credential.key_wrap_salt)
+    assert recovery_key != credential.digest
