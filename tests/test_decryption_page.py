@@ -42,6 +42,17 @@ def mock_result_popup(monkeypatch):
     return mock
 
 
+@pytest.fixture(autouse=True)
+def mock_info_popup(monkeypatch):
+    """Private-key-loaded popups use the neutral `show_info_popup` (never
+    "Success"/"Error" framing -- see `_on_load_key_clicked`), not
+    `show_result_popup`; patched separately so those tests aren't
+    blocked on a real modal `QMessageBox`."""
+    mock = MagicMock()
+    monkeypatch.setattr("ui.pages.decryption_page.show_info_popup", mock)
+    return mock
+
+
 def _device(mount_point: str, free_bytes: int = 100_000_000) -> USBDevice:
     return USBDevice(
         device_id=mount_point,
@@ -224,7 +235,7 @@ def test_view_open_and_close_do_not_pop_up_but_reset_the_loaded_key(
     assert decryption_page.view_button.isEnabled() is False
 
 
-def test_load_key_success_pops_up_result(tmp_path, decryption_page, mock_result_popup):
+def test_load_key_success_pops_up_success_notice(tmp_path, decryption_page, mock_info_popup, mock_result_popup):
     from crypto import rsa_keypair
 
     keypair = rsa_keypair.generate_rsa_keypair()
@@ -236,12 +247,19 @@ def test_load_key_success_pops_up_result(tmp_path, decryption_page, mock_result_
     decryption_page.passphrase_edit.setText("correct-passphrase")
     decryption_page._on_load_key_clicked()
 
-    mock_result_popup.assert_called_once()
-    _, kwargs = mock_result_popup.call_args
-    assert kwargs.get("ok", True) is True
+    mock_result_popup.assert_called_once_with(decryption_page, "Private key loaded.", ok=True)
+    mock_info_popup.assert_not_called()
 
 
-def test_load_key_failure_pops_up_result(tmp_path, decryption_page, mock_result_popup):
+def test_load_key_failure_activates_deception_instead_of_reporting_an_error(
+    tmp_path, decryption_page, mock_info_popup, mock_result_popup
+):
+    """Matching the proposal's Deceptive Protection Mechanism (see
+    `security.auth_controller.authenticate_private_key`): a wrong key
+    file or passphrase must look exactly like a successful load, never
+    an error -- otherwise it would confirm to an attacker that they
+    guessed wrong. Unlike a real load, though, the popup itself carries
+    no "Success" framing (`show_info_popup`, not `show_result_popup`)."""
     from crypto import rsa_keypair
 
     keypair = rsa_keypair.generate_rsa_keypair()
@@ -253,9 +271,11 @@ def test_load_key_failure_pops_up_result(tmp_path, decryption_page, mock_result_
     decryption_page.passphrase_edit.setText("wrong-passphrase")
     decryption_page._on_load_key_clicked()
 
-    mock_result_popup.assert_called_once()
-    _, kwargs = mock_result_popup.call_args
-    assert kwargs["ok"] is False
+    mock_info_popup.assert_called_once_with(decryption_page, "Private key loaded.")
+    mock_result_popup.assert_not_called()
+    assert "loaded" in decryption_page.status_label.text().lower()
+    assert decryption_page._key_wrapper is not None
+    assert decryption_page._key_is_decoy is True
 
 
 def test_view_refused_without_an_authenticated_session(tmp_path, metadata_repository, protection_keys, app):
@@ -272,7 +292,7 @@ def test_view_refused_without_an_authenticated_session(tmp_path, metadata_reposi
     assert "signed in" in page.status_label.text().lower()
 
 
-def test_wrong_passphrase_fails_to_load_key(tmp_path, decryption_page):
+def test_wrong_passphrase_loads_a_decoy_key_instead_of_failing(tmp_path, decryption_page):
     from crypto import rsa_keypair
 
     keypair = rsa_keypair.generate_rsa_keypair()
@@ -284,8 +304,28 @@ def test_wrong_passphrase_fails_to_load_key(tmp_path, decryption_page):
     decryption_page.passphrase_edit.setText("wrong-passphrase")
     decryption_page._on_load_key_clicked()
 
-    assert decryption_page._key_wrapper is None
-    assert "failed" in decryption_page.status_label.text().lower()
+    assert decryption_page._key_wrapper is not None
+    assert decryption_page._key_is_decoy is True
+    assert "loaded" in decryption_page.status_label.text().lower()
+
+
+def test_view_click_forces_deception_for_a_decoy_key(tmp_path, decryption_page):
+    """A wrong passphrase/key file marks `_key_is_decoy`; viewing a file
+    with it must force deception exactly like a decoy login session
+    does (see `test_view_click_forces_deception_for_a_decoy_session`)."""
+    decryption_page._key_is_decoy = True
+    mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path)
+
+    try:
+        with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+            mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+            decryption_page._on_view_clicked()
+
+        _, kwargs = mock_service_cls.return_value.attempt_access.call_args
+        assert kwargs["force_deception"] is True
+    finally:
+        if decryption_page._active_viewer is not None and not decryption_page._active_viewer.is_closed:
+            decryption_page._active_viewer.close()
 
 
 def test_corrupt_container_shows_an_error_instead_of_crashing(tmp_path, decryption_page):

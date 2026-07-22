@@ -55,12 +55,13 @@ from crypto.exceptions import CryptoError
 from crypto.key_wrapper import RSAOAEPKeyWrapper
 from deception.deception_engine import DeceptionEngine
 from deception.event_repository import DeceptionEventRepository
+from deception.triggers import DeceptionTrigger
 from metadata.protection import MetadataProtectionKeys
 from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
 from tracking.tracking_service import UsageTracker
 from ui.pages.base_page import BasePage
-from ui.widgets.busy import progress_dialog, show_result_popup
+from ui.widgets.busy import progress_dialog, show_info_popup, show_result_popup
 from usb.device_detector import USBDevice, USBDeviceDetector
 from usb.exceptions import USBError
 from usb.secure_access_service import SecureAccessService
@@ -151,6 +152,13 @@ class DecryptionPage(BasePage):
         self._containers: list[Path] = []
         self._selected_container: Path | None = None
         self._key_wrapper: RSAOAEPKeyWrapper | None = None
+        # Set alongside `_key_wrapper` whenever it was fabricated in place
+        # of a real load failure (wrong key file or passphrase) — see
+        # `_on_load_key_clicked`. Combined with the session's own
+        # `is_decoy` in `_on_view_clicked` so a bad key, like a decoy
+        # login, forces every subsequent view through the Deception
+        # Engine instead of ever touching real key material.
+        self._key_is_decoy = False
         self._active_viewer: Optional[SecureViewerWidget] = None
 
         self.add_widget(self._build_device_toolbar())
@@ -402,11 +410,29 @@ class DecryptionPage(BasePage):
             private_pem = Path(path_text).read_bytes()
             private_key = rsa_keypair.load_private_key(private_pem, self.passphrase_edit.text().encode("utf-8"))
         except (CryptoError, OSError) as exc:
-            self._show_status(f"Failed to load private key: {exc}", ok=False, important=True)
+            # Matching the proposal's Deceptive Protection Mechanism (see
+            # security.auth_controller.authenticate_private_key): a wrong
+            # key file or passphrase must never be reported as an error —
+            # that would confirm to an attacker that they guessed wrong.
+            # Instead, fabricate a decoy key pair that "loads" with the
+            # same inline status text as a real one (just without the
+            # "Success"-titled popup a real load gets); `_key_is_decoy`
+            # routes every later view attempt through the Deception Engine
+            # instead of ever touching real key material.
+            logger.warning("Private key load failed (%s); activating deception instead of reporting an error", exc)
+            self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS)
+            decoy_keypair = rsa_keypair.generate_rsa_keypair()
+            self._key_wrapper = RSAOAEPKeyWrapper(decoy_keypair.public_key, decoy_keypair.private_key)
+            self._key_is_decoy = True
+            self._show_status("Private key loaded.")
+            show_info_popup(self, "Private key loaded.")
+            self._update_view_button_state()
             return
 
         self._key_wrapper = RSAOAEPKeyWrapper(private_key.public_key(), private_key)
-        self._show_status("Private key loaded.", important=True)
+        self._key_is_decoy = False
+        self._show_status("Private key loaded.")
+        show_result_popup(self, "Private key loaded.", ok=True)
         self._update_view_button_state()
 
     # -- Viewing --------------------------------------------------------------
@@ -418,7 +444,7 @@ class DecryptionPage(BasePage):
             logger.warning("Decryption attempted without an authenticated session; refusing.")
             self._show_status("You must be signed in to view a file.", ok=False)
             return
-        is_decoy = self._session_manager.current.is_decoy
+        is_decoy = self._session_manager.current.is_decoy or self._key_is_decoy
         if self._metadata_repository is None and not is_decoy:
             self._show_status("No metadata repository is available in this session.", ok=False)
             return
@@ -435,7 +461,7 @@ class DecryptionPage(BasePage):
         selected_device = self._selected_device
         key_wrapper = self._key_wrapper
         owner_id = self._session_manager.current.owner_id
-        is_decoy = self._session_manager.current.is_decoy
+        is_decoy = self._session_manager.current.is_decoy or self._key_is_decoy
         try:
             file_id, encrypted_bytes = self._storage_service.read_encrypted_file_bytes(selected_container)
         except (USBError, OSError) as exc:
@@ -506,6 +532,7 @@ class DecryptionPage(BasePage):
             # its passphrase) before it can be used to view another file,
             # even a different container off the same device.
             self._key_wrapper = None
+            self._key_is_decoy = False
             self.key_path_label.setText("No private key loaded.")
             self.passphrase_edit.clear()
             self._update_view_button_state()

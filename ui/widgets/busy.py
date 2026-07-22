@@ -72,3 +72,14 @@ def show_result_popup(parent: Optional[QWidget], message: str, ok: bool = True) 
         QMessageBox.information(parent, "Success", message)
     else:
         QMessageBox.warning(parent, "Error", message)
+
+
+def show_info_popup(parent: Optional[QWidget], message: str) -> None:
+    """Surface a neutral popup that carries no pass/fail framing.
+
+    Used where a "Success"/"Error" title would itself be a signal an
+    attacker could read (e.g. loading a private key: a wrong key or
+    passphrase must produce a popup indistinguishable from a correct
+    one — see `ui.pages.decryption_page.DecryptionPage._on_load_key_clicked`).
+    """
+    QMessageBox.information(parent, "Notice", message)

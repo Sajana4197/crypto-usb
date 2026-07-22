@@ -70,6 +70,7 @@ def mock_result_popup(monkeypatch):
     monkeypatch.setattr("ui.pages.decryption_page.show_result_popup", mock)
     monkeypatch.setattr("ui.pages.settings_page.show_result_popup", mock)
     monkeypatch.setattr("ui.pages.tracking_page.show_result_popup", mock)
+    monkeypatch.setattr("ui.pages.decryption_page.show_info_popup", mock)
     return mock
 
 
@@ -158,17 +159,23 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
         encryption_page._on_export_key_clicked()
     assert exported_key_path.exists()
 
-    # -- 4. Wrong passphrase is rejected, no crash -----------------------
+    # -- 4. Wrong passphrase is deceived, not rejected --------------------
+    # Matching the Deceptive Protection Mechanism: a wrong passphrase
+    # never surfaces an error (that would confirm to an attacker they
+    # guessed wrong) -- it "loads" a decoy key indistinguishable from a
+    # real one, routing any later view through the Deception Engine.
     decryption_page.key_path_label.setText(str(exported_key_path))
     decryption_page.passphrase_edit.setText("definitely-wrong")
     decryption_page._on_load_key_clicked()
-    assert decryption_page._key_wrapper is None
-    assert "failed" in decryption_page.status_label.text().lower()
+    assert decryption_page._key_wrapper is not None
+    assert decryption_page._key_is_decoy is True
+    assert "loaded" in decryption_page.status_label.text().lower()
 
     # -- 5. Correct key opens and views the file exactly once ------------
     decryption_page.passphrase_edit.setText("a-strong-passphrase")
     decryption_page._on_load_key_clicked()
     assert decryption_page._key_wrapper is not None
+    assert decryption_page._key_is_decoy is False
 
     decryption_page._devices = [device]
     decryption_page._selected_device = device
