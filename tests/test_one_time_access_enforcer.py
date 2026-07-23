@@ -161,3 +161,57 @@ def test_burn_does_not_touch_the_original_container_bytes(
 
     assert container.ciphertext == original_ciphertext
     assert container.nonce == original_nonce
+
+
+# -- mirror_repositories (Phase E) ------------------------------------------
+
+
+@pytest.fixture
+def mirror_connection():
+    conn = sqlite3.connect(":memory:")
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def mirror_repository(mirror_connection):
+    return MetadataRepository(mirror_connection)
+
+
+def test_burn_mirrors_the_post_burn_record_to_every_mirror_repository(
+    repository, mirror_repository, one_time_metadata, wrapper, session_keys
+):
+    """A file's metadata can live in more than one place at once (a local
+    SQLite record alongside its own USB-resident portable-metadata
+    section — see `ui.pages.decryption_page._on_view_clicked`). Without mirroring,
+    burning through one copy would leave the other looking untouched
+    (`access_count` still 0, the real `wrapped_key` still intact),
+    letting the file be legitimately decrypted again through whichever
+    copy wasn't burned."""
+    mirror_repository.save(MetadataProtector(session_keys).protect(one_time_metadata))
+    enforcer = OneTimeAccessEnforcer(repository, mirror_repositories=[mirror_repository])
+
+    new_keys = enforcer.burn(one_time_metadata, wrapper, session_keys)
+
+    primary_stored = repository.load("file-1")
+    mirror_stored = mirror_repository.load("file-1")
+    assert mirror_stored.ciphertext == primary_stored.ciphertext
+    assert mirror_stored.hmac_tag == primary_stored.hmac_tag
+
+    # The mirror is just as burned as the primary: the old session keys
+    # can no longer open it, and the new keys reveal access_count reset.
+    with pytest.raises(MetadataTamperError):
+        MetadataProtector(session_keys).unprotect(mirror_stored)
+    reopened = MetadataProtector(new_keys).unprotect(mirror_stored)
+    assert reopened.access_count == 0
+    assert reopened.wrapped_key == one_time_metadata.wrapped_key  # both copies got the identical post-burn decoy
+
+
+def test_burn_with_no_mirrors_configured_behaves_exactly_as_before(
+    enforcer, one_time_metadata, wrapper, session_keys
+):
+    """Default construction (`OneTimeAccessEnforcer(repository)`, no
+    `mirror_repositories`) must be a no-op change — covers every
+    existing caller that only ever had one repository."""
+    new_keys = enforcer.burn(one_time_metadata, wrapper, session_keys)
+    assert new_keys is not None

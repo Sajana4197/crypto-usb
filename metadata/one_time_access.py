@@ -10,15 +10,19 @@ replaced with a freshly generated, unrelated key wrapped under the same
 ever decrypt the file's actual ciphertext again, since AES-GCM
 authentication fails deterministically against the wrong key.
 
-The file's ciphertext itself is never touched — deliberately. Nothing
-needs to be deleted for the file to become permanently unreadable, and
-`access_count` is reset to 0 rather than incremented, so a party who
-only ever sees the metadata record cannot tell a burned file from one
-that was never accessed. That indistinguishability is what lets
-`usb.secure_access_service` route every future decrypt failure against
-a burned file to the Deception Engine on the same footing as any other
-failure — neither the metadata nor the failure mode gives away *why*
-access was refused.
+Burning alone never touches the file's ciphertext — deliberately.
+Nothing needs to be deleted for the file to become permanently
+unreadable, and `access_count` is reset to 0 rather than incremented,
+so a party who only ever sees the metadata record cannot tell a
+burned file from one that was never accessed. That indistinguishability
+is what lets `usb.secure_access_service` route every future decrypt
+failure against a still-present burned file to the Deception Engine on
+the same footing as any other failure — neither the metadata nor the
+failure mode gives away *why* access was refused. `SecureAccessService`
+can optionally delete the container after burning it too (see its
+`container_path` parameter) — that deletion is layered on top of, and
+entirely separate from, what this module does; burning by itself never
+deletes anything.
 
 The AES File Encryption Key used to decrypt the file during this
 viewing session is not destroyed here — it already is, unconditionally,
@@ -29,7 +33,7 @@ view the file in the first place.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 from core.logger import get_logger
 from crypto.key_manager import KeyManager
@@ -45,9 +49,28 @@ logger = get_logger(__name__)
 class OneTimeAccessEnforcer:
     """Burns a one-time-access file's key material immediately after viewing."""
 
-    def __init__(self, repository: MetadataRepository, key_manager: Optional[KeyManager] = None) -> None:
+    def __init__(
+        self,
+        repository: MetadataRepository,
+        key_manager: Optional[KeyManager] = None,
+        mirror_repositories: Sequence[MetadataRepository] = (),
+    ) -> None:
+        """`mirror_repositories` are any other stores holding their own
+        protected copy of the same file's metadata (e.g. a file's local
+        SQLite record when the just-validated copy came from its
+        USB-resident portable-metadata section instead, or vice versa — see
+        `ui.pages.decryption_page._on_view_clicked`). Without this, a
+        one-time-access burn made through one copy would leave any other
+        copy looking untouched (`access_count` still 0, the real
+        `wrapped_key` still intact), letting the file be legitimately
+        decrypted again through whichever copy wasn't burned. `burn`
+        writes the identical post-burn record to every mirror, so all
+        copies become equally, permanently unreadable no matter which
+        one a future caller happens to validate against.
+        """
         self._repository = repository
         self._key_manager = key_manager or KeyManager()
+        self._mirror_repositories = tuple(mirror_repositories)
 
     def burn(
         self,
@@ -91,6 +114,8 @@ class OneTimeAccessEnforcer:
 
         protected = MetadataProtector(new_keys).protect(metadata)
         self._repository.save(protected)
+        for mirror in self._mirror_repositories:
+            mirror.save(protected)
 
         logger.warning(
             "One-time access consumed for file_id=%s; the file can no longer be legitimately decrypted",

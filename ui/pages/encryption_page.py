@@ -24,6 +24,30 @@ private key to a file of their choosing. Without doing this before
 closing the app, a file written here can never be decrypted again by
 anyone, including its owner — the private key would exist nowhere.
 
+Each write also derives that file's own portable metadata protection
+keys from this same session private key plus a passphrase (prompted
+for fresh on every write — see `_prompt_passphrase`) and a fresh
+random salt (`metadata.protection.derive_protection_keys_from_key_material`),
+and embeds the resulting protected metadata directly in the `.cusc`
+container as its portable-metadata section
+(`usb.secure_container.SecureContainer`) — one file, not a separate
+sibling. Because the same private key + passphrase always re-derive
+the same keys, that metadata is recoverable on any machine holding
+just this one file — no local database required. This is additive and
+best-effort: if the passphrase prompt is cancelled or the passphrase
+is too short, the write still proceeds exactly as before, just without
+a portable-metadata section.
+
+Every write prompts fresh, unconditionally — so two files written in
+the same page session can be protected by two different passphrases.
+"Export Key Pair..." only reuses a passphrase from the write that
+*immediately* preceded it (so exporting right after writing a file
+doesn't ask twice for the same file); it prompts independently if
+nothing was just written (e.g. exporting before any write this
+session, or a second export after a second, different write). Writing
+a further file always overwrites this one-write-deep memory with its
+own fresh prompt, never with the previous file's.
+
 Mirrors `ui.pages.decryption_page.DecryptionPage`'s device-table ->
 panel -> containers-table structure, so the file you just wrote here
 shows up immediately in this page's own containers table — not just on
@@ -39,6 +63,7 @@ changed since the last check.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -68,10 +93,10 @@ from crypto import rsa_keypair
 from crypto.exceptions import CryptoError
 from crypto.key_wrapper import RSAOAEPKeyWrapper
 from metadata.models import UsagePolicy
-from metadata.protection import MetadataProtectionKeys
+from metadata.protection import MetadataProtectionKeys, derive_protection_keys_from_key_material
 from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
-from security.password_hasher import MIN_PASSWORD_LENGTH
+from security.password_hasher import MIN_PASSWORD_LENGTH, SALT_LEN_BYTES
 from ui.pages.base_page import BasePage
 from ui.widgets.busy import busy_cursor, progress_dialog, show_result_popup
 from usb.device_detector import USBDevice, USBDeviceDetector
@@ -119,6 +144,7 @@ class EncryptionPage(BasePage):
         self._source_path: Path | None = None
         self._key_wrapper: RSAOAEPKeyWrapper | None = None
         self._last_write: SecureWriteResult | None = None
+        self._last_write_passphrase: bytes | None = None
 
         self.add_widget(self._build_device_toolbar())
         self.add_widget(self._build_device_table())
@@ -370,23 +396,67 @@ class EncryptionPage(BasePage):
             self._key_wrapper = RSAOAEPKeyWrapper(keypair.public_key, keypair.private_key)
         return self._key_wrapper
 
+    def _prompt_passphrase(self, title: str, message: str) -> Optional[bytes]:
+        """Prompt for a passphrase, unconditionally. Returns None if the
+        prompt is cancelled or the passphrase is too short — callers
+        must treat that as "skip the portable copy"/"export cancelled",
+        not as an error.
+        """
+        passphrase, ok = QInputDialog.getText(self, title, message, QLineEdit.EchoMode.Password)
+        if not ok or len(passphrase) < MIN_PASSWORD_LENGTH:
+            return None
+        return passphrase.encode("utf-8")
+
+    def _derive_portable_metadata_keys(
+        self, key_wrapper: RSAOAEPKeyWrapper
+    ) -> tuple[Optional[MetadataProtectionKeys], Optional[bytes]]:
+        """Always prompts fresh (see the module docstring) — every write
+        gets its own passphrase, even a second file written in the same
+        session. Remembers it in `_last_write_passphrase` purely so an
+        export immediately after this write doesn't ask again for the
+        same file; a failed/cancelled prompt clears that memory so a
+        following export doesn't silently reuse an older, unrelated
+        file's passphrase instead.
+        """
+        if key_wrapper.private_key is None:
+            self._last_write_passphrase = None
+            return None, None
+        passphrase = self._prompt_passphrase(
+            "Protect Portable Metadata",
+            "Passphrase to protect this file's portable metadata "
+            f"(minimum {MIN_PASSWORD_LENGTH} characters):",
+        )
+        self._last_write_passphrase = passphrase
+        if passphrase is None:
+            return None, None
+
+        salt = os.urandom(SALT_LEN_BYTES)
+        private_key_material = rsa_keypair.private_key_material(key_wrapper.private_key)
+        keys = derive_protection_keys_from_key_material(private_key_material, passphrase, salt)
+        return keys, salt
+
     def _on_export_key_clicked(self) -> None:
         key_wrapper = self._get_key_wrapper()
         if key_wrapper.private_key is None:
             self._show_status("No private key available to export.", ok=False)
             return
 
-        passphrase, ok = QInputDialog.getText(
-            self,
-            "Export Private Key",
-            f"Passphrase to encrypt the exported key (minimum {MIN_PASSWORD_LENGTH} characters):",
-            QLineEdit.EchoMode.Password,
-        )
-        if not ok or len(passphrase) < MIN_PASSWORD_LENGTH:
-            if ok:
-                self._show_status(
-                    f"Export cancelled: passphrase must be at least {MIN_PASSWORD_LENGTH} characters.", ok=False
-                )
+        # Reuses the passphrase from the write that just happened, if
+        # any (see `_derive_portable_metadata_keys`) — so exporting right
+        # after writing a file doesn't ask a second time for it. Prompts
+        # fresh only when nothing was just written (e.g. export clicked
+        # before any write this session).
+        if self._last_write_passphrase is not None:
+            passphrase_bytes = self._last_write_passphrase
+        else:
+            passphrase_bytes = self._prompt_passphrase(
+                "Export Private Key",
+                f"Passphrase to encrypt the exported key (minimum {MIN_PASSWORD_LENGTH} characters):",
+            )
+        if passphrase_bytes is None:
+            self._show_status(
+                f"Export cancelled: passphrase must be at least {MIN_PASSWORD_LENGTH} characters.", ok=False
+            )
             return
 
         path, _ = QFileDialog.getSaveFileName(
@@ -396,7 +466,7 @@ class EncryptionPage(BasePage):
             return
 
         try:
-            private_pem = rsa_keypair.serialize_private_key(key_wrapper.private_key, passphrase.encode("utf-8"))
+            private_pem = rsa_keypair.serialize_private_key(key_wrapper.private_key, passphrase_bytes)
             Path(path).write_bytes(private_pem)
         except (CryptoError, OSError) as exc:
             logger.error("Failed to export private key to %s: %s", path, exc)
@@ -430,6 +500,7 @@ class EncryptionPage(BasePage):
         becomes in the meantime.
         """
         key_wrapper = self._get_key_wrapper()
+        portable_metadata_keys, portable_metadata_salt = self._derive_portable_metadata_keys(key_wrapper)
 
         try:
             with progress_dialog(self, "Encrypting and writing secure container..."):
@@ -443,6 +514,8 @@ class EncryptionPage(BasePage):
                     metadata_repository=self._metadata_repository,
                     bind_to_device=True,
                     usage_policy=UsagePolicy(one_time_access=self.one_time_access_checkbox.isChecked()),
+                    portable_metadata_keys=portable_metadata_keys,
+                    portable_metadata_salt=portable_metadata_salt,
                 )
         except ContainerOverwriteError:
             if self._confirm_overwrite():

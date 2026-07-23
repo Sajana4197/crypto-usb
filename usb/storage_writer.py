@@ -102,6 +102,40 @@ class SecureStorageWriter:
 
         return destination
 
+    def rewrite_container_in_place(self, container: SecureContainer, destination: Path) -> Path:
+        """Atomically overwrite an *existing* `.cusc` file at `destination`
+        with `container`'s current contents — same temp-file-then-
+        `os.replace` approach as `write_container`, so a crash mid-write
+        never leaves a corrupt file behind, but skips device validation
+        and the overwrite-protection check: this is for updating a
+        container already known to be at `destination` (currently only
+        `metadata.portable_repository.PortableMetadataRepository.save`,
+        rewriting the embedded portable-metadata section after a
+        one-time-access burn), not writing a new file for the first time.
+        """
+        destination = Path(destination)
+        payload = container.serialize()
+
+        temp_path = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(temp_path, "wb") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temp_path, destination)
+        except OSError as exc:
+            self._cleanup(temp_path)
+            logger.error("Failed to rewrite secure container at %s: %s", destination, exc)
+            raise ContainerWriteError(f"Failed to rewrite container at {destination}: {exc}") from exc
+
+        logger.info(
+            "Rewrote secure container file_id=%s -> %s (%d bytes)",
+            container.file_id,
+            destination,
+            len(payload),
+        )
+        return destination
+
     def read_container(self, path: Path) -> SecureContainer:
         """Load and structurally verify a container from disk."""
         data = Path(path).read_bytes()

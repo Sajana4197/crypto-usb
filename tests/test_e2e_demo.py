@@ -151,6 +151,15 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
     assert written.exists()
     assert PLAINTEXT.encode() not in written.read_bytes()
 
+    # Captured now, before step 5's legitimate view -- which, being a
+    # one-time-access file, deletes `written` from disk once it succeeds
+    # (see SecureAccessService.attempt_access's container_path). Step 6
+    # simulates someone who kept a copy of the ciphertext from before
+    # that deletion attempting to reopen it.
+    from usb.secure_access_service import SecureAccessService
+
+    file_id, encrypted_bytes = encryption_page._service.read_encrypted_file_bytes(written)
+
     # -- 3. Export the file-wrapping private key -------------------------
     exported_key_path = tmp_path / "key.pem"
     with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), patch.object(
@@ -163,19 +172,22 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
     # Matching the Deceptive Protection Mechanism: a wrong passphrase
     # never surfaces an error (that would confirm to an attacker they
     # guessed wrong) -- it "loads" a decoy key indistinguishable from a
-    # real one, routing any later view through the Deception Engine.
+    # real one. That fabricated key is cryptographically unrelated to
+    # the real one, so any later view attempt fails on its own -- the
+    # portable-metadata HMAC check or the real decrypt itself -- without
+    # any dedicated flag forcing it through the Deception Engine (see
+    # `test_wrong_passphrase_view_attempt_is_deceived_via_natural_hmac_failure`
+    # in test_decryption_page.py for that path exercised end-to-end).
     decryption_page.key_path_label.setText(str(exported_key_path))
     decryption_page.passphrase_edit.setText("definitely-wrong")
     decryption_page._on_load_key_clicked()
     assert decryption_page._key_wrapper is not None
-    assert decryption_page._key_is_decoy is True
     assert "loaded" in decryption_page.status_label.text().lower()
 
     # -- 5. Correct key opens and views the file exactly once ------------
     decryption_page.passphrase_edit.setText("a-strong-passphrase")
     decryption_page._on_load_key_clicked()
     assert decryption_page._key_wrapper is not None
-    assert decryption_page._key_is_decoy is False
 
     decryption_page._devices = [device]
     decryption_page._selected_device = device
@@ -194,9 +206,6 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
     def _capture(buffer, metadata) -> None:
         second_viewer_content["real"] = bytes(buffer)
 
-    from usb.secure_access_service import SecureAccessService
-
-    file_id, encrypted_bytes = encryption_page._service.read_encrypted_file_bytes(written)
     access_service = SecureAccessService(metadata_repository, usage_tracker=tracker)
     second_outcome = access_service.attempt_access(
         file_id, encrypted_bytes, key_wrapper, result.protection_keys, _capture, user=session.owner_id

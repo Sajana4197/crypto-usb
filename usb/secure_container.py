@@ -1,19 +1,33 @@
 """Secure container format for USB storage.
 
-Bundles the three things the Secure Storage Layer must persist for a
-protected file — the AES-256-GCM encrypted file, its wrapped FEK
-(`crypto.file_encryptor.EncryptedContainer`), and its encrypted+HMAC
-metadata record (`metadata.protection.ProtectedMetadata`) — into one
+Bundles everything the Secure Storage Layer must persist for a
+protected file — the AES-256-GCM encrypted file and its wrapped FEK
+(`crypto.file_encryptor.EncryptedContainer`), its local encrypted+HMAC
+metadata record (`metadata.protection.ProtectedMetadata`), and
+optionally a portable metadata envelope
+(`metadata.portable_envelope.PortableMetadataEnvelope`, protected
+under keys derived from the file-wrapping private key + a passphrase
+rather than any local secret — see that module) — into one
 self-contained binary envelope (`.cusc`), plus an outer SHA-256 hash
 covering the whole payload so tampering, truncation, or a corrupted
 write can be detected without needing any key material at all.
 Nothing in this module ever holds or serializes plaintext.
+
+The portable section is what previously shipped as a separate
+`.cumeta` sibling file next to the `.cusc` container; embedding it
+here means one file on the USB device fully represents one protected
+file, with nothing else needed to locate or keep track of. A version-1
+container (written before this section existed) has no portable
+section at all and still deserializes fine, with `portable_metadata`
+coming back `None` — old `.cusc` files already on a device keep working
+unchanged.
 """
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from typing import Optional
 
 from core.logger import get_logger
 from crypto import aes_cipher
@@ -21,14 +35,16 @@ from crypto.exceptions import DecryptionError, KeyUnwrappingError
 from crypto.file_encryptor import EncryptedContainer
 from crypto.key_manager import KeyManager
 from crypto.key_wrapper import KeyWrapper
-from metadata.exceptions import MetadataTamperError
+from metadata.exceptions import MetadataTamperError, MetadataValidationError
+from metadata.portable_envelope import PortableMetadataEnvelope
 from metadata.protection import MetadataProtector, ProtectedMetadata
 from usb.exceptions import ContainerVerificationError
 
 logger = get_logger(__name__)
 
 MAGIC = b"CUSC"  # CryptoUSB Secure Container
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+_MIN_FORMAT_VERSION_WITH_PORTABLE_SECTION = 2
 CONTAINER_EXTENSION = ".cusc"
 _OUTER_HASH_SIZE_BYTES = 32
 
@@ -40,6 +56,7 @@ class SecureContainer:
     file_id: str
     file_container: EncryptedContainer
     protected_metadata: ProtectedMetadata
+    portable_metadata: Optional[PortableMetadataEnvelope] = None
 
     def serialize(self) -> bytes:
         """Serialize to the `.cusc` binary format, header through outer hash."""
@@ -49,6 +66,7 @@ class SecureContainer:
 
         file_blob = self.file_container.serialize()
         meta_blob = _serialize_protected_metadata(self.protected_metadata)
+        portable_blob = self.portable_metadata.serialize() if self.portable_metadata is not None else b""
 
         body = b"".join(
             [
@@ -60,6 +78,8 @@ class SecureContainer:
                 file_blob,
                 len(meta_blob).to_bytes(8, "big"),
                 meta_blob,
+                len(portable_blob).to_bytes(8, "big"),
+                portable_blob,
             ]
         )
         checksum = hashlib.sha256(body).digest()
@@ -82,7 +102,7 @@ class SecureContainer:
         if body[:4] != MAGIC:
             raise ContainerVerificationError("Not a valid CUSC secure container (bad magic bytes)")
         version = body[4]
-        if version != FORMAT_VERSION:
+        if version < 1 or version > FORMAT_VERSION:
             raise ContainerVerificationError(f"Unsupported container version: {version}")
 
         offset = 5
@@ -99,6 +119,18 @@ class SecureContainer:
         meta_blob_len = int.from_bytes(body[offset : offset + 8], "big")
         offset += 8
         meta_blob = body[offset : offset + meta_blob_len]
+        offset += meta_blob_len
+
+        portable_metadata = None
+        if version >= _MIN_FORMAT_VERSION_WITH_PORTABLE_SECTION:
+            portable_blob_len = int.from_bytes(body[offset : offset + 8], "big")
+            offset += 8
+            portable_blob = body[offset : offset + portable_blob_len]
+            if portable_blob:
+                try:
+                    portable_metadata = PortableMetadataEnvelope.deserialize(portable_blob)
+                except MetadataValidationError as exc:
+                    raise ContainerVerificationError(f"Embedded portable metadata is invalid: {exc}") from exc
 
         try:
             file_container = EncryptedContainer.deserialize(file_blob)
@@ -107,7 +139,12 @@ class SecureContainer:
 
         protected_metadata = _deserialize_protected_metadata(meta_blob, file_id)
 
-        return cls(file_id=file_id, file_container=file_container, protected_metadata=protected_metadata)
+        return cls(
+            file_id=file_id,
+            file_container=file_container,
+            protected_metadata=protected_metadata,
+            portable_metadata=portable_metadata,
+        )
 
 
 def _serialize_protected_metadata(protected: ProtectedMetadata) -> bytes:

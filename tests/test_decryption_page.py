@@ -8,6 +8,7 @@ wires between them in the real application.
 
 from __future__ import annotations
 
+import random
 import sqlite3
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -15,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
 
+from deception.content_types import DeceptionContentType
 from deception.event_repository import DeceptionEventRepository
 from metadata.protection import generate_protection_keys
 from metadata.repository import MetadataRepository
@@ -26,6 +28,19 @@ from tracking.tracking_service import UsageTracker
 from ui.pages.decryption_page import DecryptionPage
 from ui.pages.encryption_page import EncryptionPage
 from usb.device_detector import USBDevice
+
+
+class _FakeTextOnlyRandom(random.Random):
+    """A `random.Random` that always resolves `DeceptionEngine.activate`'s
+    content-type roll to `FAKE_TEXT`, leaving every other call (filename
+    stem/number) genuinely random -- lets a test pin down which widget
+    `SecureViewerWidget.display` will use without stubbing out content
+    generation entirely."""
+
+    def choice(self, seq):
+        if list(seq) == list(DeceptionContentType):
+            return DeceptionContentType.FAKE_TEXT
+        return super().choice(seq)
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +66,19 @@ def mock_info_popup(monkeypatch):
     mock = MagicMock()
     monkeypatch.setattr("ui.pages.decryption_page.show_info_popup", mock)
     return mock
+
+
+@pytest.fixture(autouse=True)
+def mock_passphrase_prompt(monkeypatch):
+    """`EncryptionPage._on_write_clicked` derives portable metadata keys
+    and prompts for a passphrase via `QInputDialog.getText` (see
+    `_prompt_passphrase`) -- autouse a valid default so
+    this file's writes, driven exactly as a user would (unlike
+    `test_e2e_demo.py`, which calls the service layer directly), don't
+    hang on a real modal dialog. Tests that explicitly patch
+    `QInputDialog.getText` themselves (e.g. for `_on_export_key_clicked`)
+    still work, nested inside their own `with patch.object(...)` block."""
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("a-valid-default-passphrase", True))
 
 
 def _device(mount_point: str, free_bytes: int = 100_000_000) -> USBDevice:
@@ -130,12 +158,19 @@ def test_encryption_page_writes_and_decryption_page_reads_it_back(tmp_path, encr
     device = _device(str(device_dir))
 
     # -- Write via EncryptionPage, exactly as a user driving the UI would. --
+    # Same passphrase re-entered by hand at write time (portable metadata
+    # derivation) and export time (PEM encryption) below -- both prompts
+    # are independent (see `_prompt_passphrase`), so a real user must
+    # supply this consistency themselves for the container's embedded
+    # portable-metadata section to be re-derivable after loading the
+    # exported key with that same passphrase.
     encryption_page._devices = [device]
     encryption_page._populate_table()
     encryption_page.table.selectRow(0)
     encryption_page._source_path = source
     encryption_page._update_write_button_state()
-    encryption_page._on_write_clicked()
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)):
+        encryption_page._on_write_clicked()
 
     written = list(device_dir.glob("*.cusc"))
     assert len(written) == 1
@@ -197,12 +232,14 @@ def test_view_open_and_close_do_not_pop_up_but_reset_the_loaded_key(
     encryption_page.table.selectRow(0)
     encryption_page._source_path = source
     encryption_page._update_write_button_state()
-    encryption_page._on_write_clicked()
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)):
+        encryption_page._on_write_clicked()
 
+    # Export reuses the passphrase the write above just prompted for
+    # (see `_on_export_key_clicked`) -- no `QInputDialog.getText` patch
+    # needed here.
     exported_key_path = tmp_path / "key.pem"
-    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), patch.object(
-        QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
-    ):
+    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")):
         encryption_page._on_export_key_clicked()
 
     decryption_page._devices = [device]
@@ -275,7 +312,6 @@ def test_load_key_failure_activates_deception_instead_of_reporting_an_error(
     mock_result_popup.assert_not_called()
     assert "loaded" in decryption_page.status_label.text().lower()
     assert decryption_page._key_wrapper is not None
-    assert decryption_page._key_is_decoy is True
 
 
 def test_view_refused_without_an_authenticated_session(tmp_path, metadata_repository, protection_keys, app):
@@ -305,15 +341,20 @@ def test_wrong_passphrase_loads_a_decoy_key_instead_of_failing(tmp_path, decrypt
     decryption_page._on_load_key_clicked()
 
     assert decryption_page._key_wrapper is not None
-    assert decryption_page._key_is_decoy is True
     assert "loaded" in decryption_page.status_label.text().lower()
 
 
-def test_view_click_forces_deception_for_a_decoy_key(tmp_path, decryption_page):
-    """A wrong passphrase/key file marks `_key_is_decoy`; viewing a file
-    with it must force deception exactly like a decoy login session
-    does (see `test_view_click_forces_deception_for_a_decoy_session`)."""
-    decryption_page._key_is_decoy = True
+def test_view_click_does_not_force_deception_for_a_decoy_key_load_failure(tmp_path, decryption_page):
+    """A wrong passphrase/key file (Phase D) no longer sets any flag that
+    forces `force_deception`: the fabricated key is cryptographically
+    unrelated to the real one, so it fails on its own -- either the
+    portable-metadata HMAC check or the real decrypt attempt (see
+    `test_wrong_passphrase_view_attempt_is_deceived_via_natural_hmac_failure`
+    for that end-to-end path) -- exactly like a genuine denial, without
+    ever touching `force_deception`. Only a decoy *session*
+    (`test_view_click_forces_deception_for_a_decoy_session`) still short-
+    circuits that way."""
+    decryption_page._key_wrapper = object()  # stands in for a fabricated decoy key; no flag to set anymore
     mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path)
 
     try:
@@ -322,10 +363,74 @@ def test_view_click_forces_deception_for_a_decoy_key(tmp_path, decryption_page):
             decryption_page._on_view_clicked()
 
         _, kwargs = mock_service_cls.return_value.attempt_access.call_args
-        assert kwargs["force_deception"] is True
+        assert kwargs["force_deception"] is False
     finally:
         if decryption_page._active_viewer is not None and not decryption_page._active_viewer.is_closed:
             decryption_page._active_viewer.close()
+
+
+def test_wrong_passphrase_view_attempt_is_deceived_via_natural_hmac_failure(
+    tmp_path, encryption_page, decryption_page
+):
+    """End-to-end (Phase D): with no `_key_is_decoy` flag left to force
+    deception, a wrong-passphrase load must still never reveal the real
+    file, relying entirely on the natural failure path -- the fabricated
+    decoy key re-derives the wrong portable-metadata protection keys
+    (see `metadata.protection.derive_protection_keys_from_key_material`),
+    which fails `MetadataProtector.unprotect`'s own HMAC check exactly
+    like tampered metadata would, denying access through the real
+    `SecureAccessService` / `ValidationEngine` stack -- not a mock."""
+    source = tmp_path / "findings.txt"
+    plaintext = "the quarterly figures are confidential"
+    source.write_text(plaintext, encoding="utf-8")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    encryption_page._devices = [device]
+    encryption_page._populate_table()
+    encryption_page.table.selectRow(0)
+    encryption_page._source_path = source
+    encryption_page._update_write_button_state()
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)):
+        encryption_page._on_write_clicked()
+    from usb.storage_writer import SecureStorageWriter
+
+    written = list(device_dir.glob("*.cusc"))
+    assert len(written) == 1
+    assert SecureStorageWriter().read_container(written[0]).portable_metadata is not None, (
+        "the write must have embedded a portable metadata section"
+    )
+
+    exported_key_path = tmp_path / "key.pem"
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), patch.object(
+        QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
+    ):
+        encryption_page._on_export_key_clicked()
+
+    decryption_page._devices = [device]
+    decryption_page._selected_device = device
+    decryption_page._refresh_containers()
+
+    decryption_page.key_path_label.setText(str(exported_key_path))
+    decryption_page.passphrase_edit.setText("definitely-the-wrong-passphrase")
+    decryption_page._on_load_key_clicked()
+    assert decryption_page._key_wrapper is not None
+    assert "loaded" in decryption_page.status_label.text().lower()
+
+    decryption_page.container_table.selectRow(0)
+    # The Deception Engine picks its fake content type at random; pin it
+    # to text so the assertion below can inspect `_text_view` instead of
+    # having to branch on whichever widget the viewer happened to show.
+    decryption_page._deception_engine._rng = _FakeTextOnlyRandom()
+    decryption_page._on_view_clicked()
+
+    assert decryption_page._active_viewer is not None
+    # Deceived, not denied: the viewer still opens and the status message
+    # never distinguishes this from a real success.
+    assert decryption_page._active_viewer._text_view.toPlainText() != plaintext
+    assert "opened" in decryption_page.status_label.text().lower()
+    decryption_page._active_viewer.close()
 
 
 def test_corrupt_container_shows_an_error_instead_of_crashing(tmp_path, decryption_page):
@@ -591,9 +696,13 @@ def test_denied_attempt_through_the_page_is_recorded_in_the_shared_event_reposit
     encryption_page_helper.table.selectRow(0)
     encryption_page_helper._source_path = source
     encryption_page_helper._update_write_button_state()
-    encryption_page_helper._on_write_clicked()
+    with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)):
+        encryption_page_helper._on_write_clicked()
     written = list(device_dir.glob("*.cusc"))[0]
 
+    # Write and export always prompt independently (no caching -- see
+    # the module docstring); re-entering the same passphrase for both is
+    # what keeps the exported PEM matched to this file's portable metadata.
     exported_key_path = tmp_path / "key.pem"
     with patch.object(QInputDialog, "getText", return_value=("a-strong-passphrase", True)), patch.object(
         QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
@@ -688,3 +797,196 @@ def test_refresh_devices_clears_selection_when_selected_device_disappears(app, t
     page._refresh_devices()
 
     assert page._selected_device is None
+
+
+# -- One-time access deletes the container after its single view ----------
+
+
+def test_one_time_access_view_deletes_the_container_from_the_device(
+    tmp_path, encryption_page, decryption_page
+):
+    source = tmp_path / "findings.txt"
+    plaintext = "self-destructing message"
+    source.write_text(plaintext, encoding="utf-8")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    encryption_page._devices = [device]
+    encryption_page._populate_table()
+    encryption_page.table.selectRow(0)
+    encryption_page._source_path = source
+    encryption_page._update_write_button_state()
+    encryption_page.one_time_access_checkbox.setChecked(True)
+    with patch.object(QInputDialog, "getText", return_value=("shared-passphrase", True)):
+        encryption_page._on_write_clicked()
+
+    cusc = list(device_dir.glob("*.cusc"))[0]
+    assert cusc.exists()
+
+    exported_key_path = tmp_path / "key.pem"
+    with patch.object(QInputDialog, "getText", return_value=("shared-passphrase", True)), patch.object(
+        QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
+    ):
+        encryption_page._on_export_key_clicked()
+
+    decryption_page._devices = [device]
+    decryption_page._selected_device = device
+    decryption_page._refresh_containers()
+    decryption_page.key_path_label.setText(str(exported_key_path))
+    decryption_page.passphrase_edit.setText("shared-passphrase")
+    decryption_page._on_load_key_clicked()
+    decryption_page.container_table.selectRow(0)
+    decryption_page._on_view_clicked()
+
+    assert decryption_page._active_viewer is not None
+    assert decryption_page._active_viewer._text_view.toPlainText() == plaintext
+    decryption_page._active_viewer.close()
+
+    assert not cusc.exists(), "the .cusc file must be deleted from the device after its one legitimate view"
+    # The container table reflects this immediately, without waiting for
+    # the next device-poll tick.
+    assert decryption_page._containers == []
+    assert list(device_dir.glob("*.cusc")) == []
+
+
+def test_reusable_file_view_does_not_delete_the_container(tmp_path, encryption_page, decryption_page):
+    """Only a one-time-access file's container is deleted after a view --
+    a normal, reusable file must still be sitting on the device afterward,
+    unlike the one-time-access case above."""
+    source = tmp_path / "findings.txt"
+    plaintext = "read me as many times as you like"
+    source.write_text(plaintext, encoding="utf-8")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    encryption_page._devices = [device]
+    encryption_page._populate_table()
+    encryption_page.table.selectRow(0)
+    encryption_page._source_path = source
+    encryption_page._update_write_button_state()
+    # one_time_access_checkbox left unchecked -- a reusable file.
+    with patch.object(QInputDialog, "getText", return_value=("shared-passphrase", True)):
+        encryption_page._on_write_clicked()
+
+    cusc = list(device_dir.glob("*.cusc"))[0]
+
+    exported_key_path = tmp_path / "key.pem"
+    with patch.object(QInputDialog, "getText", return_value=("shared-passphrase", True)), patch.object(
+        QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
+    ):
+        encryption_page._on_export_key_clicked()
+
+    decryption_page._devices = [device]
+    decryption_page._selected_device = device
+    decryption_page._refresh_containers()
+    decryption_page.key_path_label.setText(str(exported_key_path))
+    decryption_page.passphrase_edit.setText("shared-passphrase")
+    decryption_page._on_load_key_clicked()
+    decryption_page.container_table.selectRow(0)
+    decryption_page._on_view_clicked()
+
+    assert decryption_page._active_viewer is not None
+    assert decryption_page._active_viewer._text_view.toPlainText() == plaintext
+    decryption_page._active_viewer.close()
+
+    assert cusc.exists(), "a reusable file's container must not be deleted after a view"
+
+
+# -- One-time access stays burned across both metadata copies (Phase E) ----
+
+
+def test_one_time_access_burn_via_portable_metadata_also_invalidates_the_local_copy(
+    tmp_path, encryption_page, decryption_page, metadata_repository, protection_keys
+):
+    """A file written on this machine gets both a local `metadata_repository`
+    record and an embedded portable-metadata section in its `.cusc`
+    file (see the module docstrings of `usb.secure_storage_service` and
+    `ui.pages.decryption_page`). `decryption_page._on_view_clicked`
+    prefers the embedded copy, so a one-time-access burn happens there
+    first -- without mirroring, the
+    local copy would be left looking untouched (`access_count` still 0,
+    the real `wrapped_key` still intact), letting a second, independent
+    access built directly against the local repository decrypt the file
+    again despite its one-time-access policy. This is the exact gap
+    `usb.secure_access_service.SecureAccessService`'s
+    `mirror_repositories` (wired up in `_on_view_clicked`) closes."""
+    source = tmp_path / "findings.txt"
+    plaintext = "one-time-access secret"
+    source.write_text(plaintext, encoding="utf-8")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    encryption_page._devices = [device]
+    encryption_page._populate_table()
+    encryption_page.table.selectRow(0)
+    encryption_page._source_path = source
+    encryption_page._update_write_button_state()
+    encryption_page.one_time_access_checkbox.setChecked(True)
+    with patch.object(QInputDialog, "getText", return_value=("shared-passphrase", True)):
+        encryption_page._on_write_clicked()
+
+    from usb.storage_writer import SecureStorageWriter
+
+    cusc = list(device_dir.glob("*.cusc"))[0]
+    assert SecureStorageWriter().read_container(cusc).portable_metadata is not None, (
+        "both a local record and an embedded portable-metadata section must exist"
+    )
+
+    # Captured before the legitimate view below -- which, being a
+    # one-time-access file, deletes `cusc` from disk once it succeeds
+    # (see SecureAccessService.attempt_access's container_path). The
+    # "second attempt" further down simulates someone who kept a copy of
+    # the ciphertext from before that deletion.
+    file_id, encrypted_bytes = encryption_page._service.read_encrypted_file_bytes(cusc)
+
+    exported_key_path = tmp_path / "key.pem"
+    with patch.object(QInputDialog, "getText", return_value=("shared-passphrase", True)), patch.object(
+        QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")
+    ):
+        encryption_page._on_export_key_clicked()
+
+    decryption_page._devices = [device]
+    decryption_page._selected_device = device
+    decryption_page._refresh_containers()
+    decryption_page.key_path_label.setText(str(exported_key_path))
+    decryption_page.passphrase_edit.setText("shared-passphrase")
+    decryption_page._on_load_key_clicked()
+    decryption_page.container_table.selectRow(0)
+    decryption_page._on_view_clicked()
+
+    assert decryption_page._active_viewer is not None
+    assert decryption_page._active_viewer._text_view.toPlainText() == plaintext
+    decryption_page._active_viewer.close()
+
+    # A second, independent access built directly against the LOCAL
+    # repository -- as if the embedded portable section were unavailable
+    # -- must be denied exactly like a repeat attempt through the same copy
+    # would be, not silently granted because that copy was never burned.
+    from crypto import rsa_keypair
+    from crypto.key_wrapper import RSAOAEPKeyWrapper
+    from usb.secure_access_service import SecureAccessService
+    from validation.machine_fingerprint import compute_machine_fingerprint
+    from validation.usb_identifier import compute_usb_identifier
+
+    private_key = rsa_keypair.load_private_key(exported_key_path.read_bytes(), b"shared-passphrase")
+    key_wrapper = RSAOAEPKeyWrapper(private_key.public_key(), private_key)
+
+    captured = {}
+    access_service = SecureAccessService(metadata_repository)
+    outcome = access_service.attempt_access(
+        file_id,
+        encrypted_bytes,
+        key_wrapper,
+        protection_keys,
+        lambda buf, meta: captured.__setitem__("content", bytes(buf)),
+        current_device=device,
+        current_usb_identifier=compute_usb_identifier(device),
+        current_machine_fingerprint=compute_machine_fingerprint(),
+        user="owner-1",
+    )
+
+    assert outcome.granted is False
+    assert "content" not in captured

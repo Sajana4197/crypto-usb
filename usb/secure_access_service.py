@@ -6,7 +6,8 @@ side: runs every access-time check (`validation.validation_engine`),
 decrypts strictly in RAM (`crypto.secure_decryptor`), and — for a
 one-time-access file — burns it immediately after a successful view
 (`metadata.one_time_access.OneTimeAccessEnforcer`) so it can never be
-legitimately opened again.
+legitimately opened again, then (when the caller supplies
+`container_path`) deletes the `.cusc` file itself from the USB device.
 
 Every failure, at any stage, is handed to `deception.DeceptionEngine`
 instead of being reported to the caller as an error:
@@ -14,10 +15,16 @@ instead of being reported to the caller as an error:
   unauthorized/cloned device, a reused one-time access still caught by
   the `access_count` counter) maps to the matching `DeceptionTrigger`.
 - A decrypt that fails *despite validation passing* — which, for a
-  one-time-access file, is the only place a repeat attempt is ever
+  one-time-access file that's still physically present (`burn` alone,
+  without deletion), is the only place a repeat attempt is ever
   visible, since a burned file's metadata is deliberately
   indistinguishable from an unused one (see `metadata.one_time_access`)
-  — is treated as `DeceptionTrigger.ACCESS_ALREADY_USED`.
+  — is treated as `DeceptionTrigger.ACCESS_ALREADY_USED`. Once a burned
+  file has also been deleted, a repeat attempt can no longer reach this
+  service at all — the file is simply gone from the container list —
+  which is the deliberate trade-off of enabling deletion: a consumed
+  file is now visibly gone rather than indistinguishable from an
+  untouched one.
 
 The caller never learns *why* access was refused, and neither does
 whoever is attempting it.
@@ -26,9 +33,16 @@ Metadata's `wrapped_key` — not the `wrapped_key` embedded in the
 container bytes handed to `attempt_access` — is treated as the
 authoritative key-wrapping state for every decrypt attempt. Burning a
 one-time-access file only ever updates the metadata record, never the
-stored container; treating metadata as authoritative here is what
-makes that sufficient to permanently invalidate the file without
-rewriting or deleting anything on the USB device.
+stored container itself; treating metadata as authoritative here is
+what makes burning alone sufficient to permanently invalidate the
+file's content without touching anything on the USB device — deleting
+the container afterward (`container_path`) is an additional, optional
+cleanup step layered on top, not something burning depends on. When a
+file's metadata exists in more than one place at once (a local SQLite
+record alongside its own USB-resident portable-metadata section — see
+`ui.pages.decryption_page`), `mirror_repositories` ensures a burn made
+through whichever copy this attempt validated against is written to
+every other copy too, so none of them is left looking untouched.
 
 When a `usage_tracker` is supplied, every attempt — granted or denied
 — is recorded as one `tracking.tracking_service.UsageTracker` session:
@@ -46,7 +60,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Optional
+from pathlib import Path
+from typing import Callable, Optional, Sequence
 
 from core.logger import get_logger
 from crypto.exceptions import DecryptionError, KeyUnwrappingError
@@ -143,11 +158,19 @@ class SecureAccessService:
         deception_engine: Optional[DeceptionEngine] = None,
         enforcer: Optional[OneTimeAccessEnforcer] = None,
         usage_tracker: Optional[UsageTracker] = None,
+        mirror_repositories: Sequence[MetadataRepository] = (),
     ) -> None:
+        """`mirror_repositories` — see `metadata.one_time_access.OneTimeAccessEnforcer`
+        — are any other repositories holding their own protected copy of
+        the same file's metadata (local SQLite alongside a USB-resident
+        portable-metadata section, or vice versa); a one-time-access burn
+        is mirrored to all of them so no copy is left legitimately
+        re-decryptable through a path this attempt didn't use. Ignored
+        if `enforcer` is supplied directly."""
         self._repository = repository
         self._decryptor = decryptor or SecureDecryptor()
         self._deception_engine = deception_engine or DeceptionEngine()
-        self._enforcer = enforcer or OneTimeAccessEnforcer(repository)
+        self._enforcer = enforcer or OneTimeAccessEnforcer(repository, mirror_repositories=mirror_repositories)
         self._usage_tracker = usage_tracker
 
     def attempt_access(
@@ -162,6 +185,7 @@ class SecureAccessService:
         current_machine_fingerprint: Optional[str] = None,
         user: Optional[str] = None,
         force_deception: bool = False,
+        container_path: Optional[Path] = None,
     ) -> AccessOutcome:
         """Validate and, if granted, decrypt `encrypted_file_bytes` for
         `file_id`, calling `on_granted(buffer, metadata)` with the
@@ -171,7 +195,14 @@ class SecureAccessService:
 
         If `on_granted` returns normally and the file is marked for
         one-time access, it is burned immediately afterward: this was
-        the only legitimate opportunity to view it.
+        the only legitimate opportunity to view it. If `container_path`
+        is also given, the `.cusc` file at that path is then deleted
+        from disk too — best-effort: a failure to delete (drive pulled,
+        permissions, ...) is logged but never turns a granted view into
+        a failure, since the file is already permanently unreadable
+        either way once burned. Omitting `container_path` (the default)
+        preserves the original crypto-shred-only behavior: the file
+        stays on the USB, indistinguishable from an unused one.
 
         Never raises for an expected access failure — every such case
         instead activates the Deception Engine and is reported back
@@ -282,6 +313,19 @@ class SecureAccessService:
         new_keys = protection_keys
         if metadata.usage_policy.one_time_access:
             new_keys = self._enforcer.burn(metadata, key_wrapper, protection_keys)
+            if container_path is not None:
+                try:
+                    Path(container_path).unlink()
+                    logger.info(
+                        "Deleted one-time-access container after its single legitimate view: %s", container_path
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "Burned one-time-access file_id=%s but failed to delete its container at %s: %s",
+                        file_id,
+                        container_path,
+                        exc,
+                    )
 
         on_view_closed = None
         on_screen_capture_detected = None

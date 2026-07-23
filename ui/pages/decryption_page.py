@@ -7,7 +7,10 @@ was written, and hands everything to
 `usb.secure_access_service.SecureAccessService` — which runs every
 access-time check (Validation), decrypts strictly in RAM (RAM
 Decryption), burns a one-time-access file immediately after its single
-legitimate view (One-Time Access), and records the attempt in the
+legitimate view and then deletes its `.cusc` file from the device
+(One-Time Access — this page always passes `container_path`, so a
+consumed file is both cryptographically dead and physically gone, not
+just crypto-shredded in place), and records the attempt in the
 tamper-evident usage log (Usage Tracking).
 
 Whatever `SecureAccessService.attempt_access` hands back — the real
@@ -25,6 +28,30 @@ while this page is open shows up without the user having to ask for
 it. A refresh is a no-op — it never rebuilds the table or disturbs the
 current selection — whenever the detected device set hasn't actually
 changed since the last check.
+
+Before falling back to `metadata_repository` (this machine's local
+SQLite copy), a view attempt first checks whether the selected `.cusc`
+container itself has an embedded portable-metadata section (see
+`ui.pages.encryption_page.EncryptionPage`/`usb.secure_storage_service`,
+which write it, and `usb.secure_container.SecureContainer`, which
+carries it). If present, this file's protection keys are re-derived
+from the just-loaded private key + its passphrase + that section's own
+stored salt (`metadata.protection.derive_protection_keys_from_key_material`)
+and validation/decryption proceeds entirely against that USB-resident
+copy — in RAM, never touching or requiring the local database at all.
+This is what lets a file written on one machine be opened on a
+completely different one that has never seen its `metadata_repository`,
+given only the single `.cusc` file and the correct private key +
+passphrase.
+
+A file written and read back on the *same* machine typically has both
+copies at once: the local `metadata_repository` record `EncryptionPage`
+always saves, and the container's own embedded portable section this
+page then prefers. For a one-time-access file, burning only the copy
+actually validated against would leave the other one looking untouched
+— see `usb.secure_access_service.SecureAccessService`'s
+`mirror_repositories`, which this page supplies whenever both copies
+genuinely exist for the file being viewed.
 """
 
 from __future__ import annotations
@@ -56,7 +83,8 @@ from crypto.key_wrapper import RSAOAEPKeyWrapper
 from deception.deception_engine import DeceptionEngine
 from deception.event_repository import DeceptionEventRepository
 from deception.triggers import DeceptionTrigger
-from metadata.protection import MetadataProtectionKeys
+from metadata.portable_repository import PortableMetadataRepository
+from metadata.protection import MetadataProtectionKeys, derive_protection_keys_from_key_material
 from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
 from tracking.tracking_service import UsageTracker
@@ -66,6 +94,7 @@ from usb.device_detector import USBDevice, USBDeviceDetector
 from usb.exceptions import USBError
 from usb.secure_access_service import SecureAccessService
 from usb.secure_storage_service import SecureStorageService
+from usb.storage_writer import SecureStorageWriter
 from validation.machine_fingerprint import compute_machine_fingerprint
 from validation.usb_identifier import compute_usb_identifier
 from viewer.secure_viewer_widget import SecureViewerWidget
@@ -139,6 +168,7 @@ class DecryptionPage(BasePage):
         self._session_manager = session_manager
         self._usage_tracker = usage_tracker
         self._storage_service = SecureStorageService()
+        self._portable_writer = SecureStorageWriter()
         # A single DeceptionEngine instance per page, so every denied attempt
         # in this session is recorded through the same (optional) audit
         # trail — see ui.pages.deception_page.DeceptionPage for the read-only
@@ -152,13 +182,18 @@ class DecryptionPage(BasePage):
         self._containers: list[Path] = []
         self._selected_container: Path | None = None
         self._key_wrapper: RSAOAEPKeyWrapper | None = None
-        # Set alongside `_key_wrapper` whenever it was fabricated in place
-        # of a real load failure (wrong key file or passphrase) — see
-        # `_on_load_key_clicked`. Combined with the session's own
-        # `is_decoy` in `_on_view_clicked` so a bad key, like a decoy
-        # login, forces every subsequent view through the Deception
-        # Engine instead of ever touching real key material.
-        self._key_is_decoy = False
+        # The passphrase used to load `_key_wrapper`'s private key —
+        # cached alongside it (real or fabricated, see
+        # `_on_load_key_clicked`) so a view attempt can re-derive a
+        # file's portable metadata keys (see
+        # `_load_portable_metadata_source`) without asking the user
+        # again. A fabricated key/passphrase pair re-derives to the
+        # wrong protection keys there, which fails
+        # `MetadataProtector.unprotect`'s own HMAC check exactly like
+        # tampered metadata would — no separate flag is needed to route
+        # it through the Deception Engine. Cleared together with
+        # `_key_wrapper` when the viewer closes.
+        self._loaded_key_passphrase: bytes | None = None
         self._active_viewer: Optional[SecureViewerWidget] = None
 
         self.add_widget(self._build_device_toolbar())
@@ -406,9 +441,10 @@ class DecryptionPage(BasePage):
             self._show_status("Choose a private key file first.", ok=False)
             return
 
+        passphrase_text = self.passphrase_edit.text()
         try:
             private_pem = Path(path_text).read_bytes()
-            private_key = rsa_keypair.load_private_key(private_pem, self.passphrase_edit.text().encode("utf-8"))
+            private_key = rsa_keypair.load_private_key(private_pem, passphrase_text.encode("utf-8"))
         except (CryptoError, OSError) as exc:
             # Matching the proposal's Deceptive Protection Mechanism (see
             # security.auth_controller.authenticate_private_key): a wrong
@@ -416,26 +452,79 @@ class DecryptionPage(BasePage):
             # that would confirm to an attacker that they guessed wrong.
             # Instead, fabricate a decoy key pair that "loads" with the
             # same inline status text as a real one (just without the
-            # "Success"-titled popup a real load gets); `_key_is_decoy`
-            # routes every later view attempt through the Deception Engine
-            # instead of ever touching real key material.
+            # "Success"-titled popup a real load gets). Nothing has to
+            # force a later view attempt into deception on this key's
+            # behalf: it's cryptographically unrelated to whatever the
+            # user actually meant to load, so it fails on its own when
+            # used for real — either `MetadataProtector.unprotect`'s HMAC
+            # check (a container's embedded portable section re-derives
+            # the wrong protection keys from this key + passphrase, see
+            # `_load_portable_metadata_source`) or the real decrypt
+            # attempt itself (`RSAOAEPKeyWrapper.unwrap` can't recover a
+            # FEK it never wrapped) — both already routed to the
+            # Deception Engine by `usb.secure_access_service`.
             logger.warning("Private key load failed (%s); activating deception instead of reporting an error", exc)
             self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS)
             decoy_keypair = rsa_keypair.generate_rsa_keypair()
             self._key_wrapper = RSAOAEPKeyWrapper(decoy_keypair.public_key, decoy_keypair.private_key)
-            self._key_is_decoy = True
+            self._loaded_key_passphrase = passphrase_text.encode("utf-8")
             self._show_status("Private key loaded.")
             show_info_popup(self, "Private key loaded.")
             self._update_view_button_state()
             return
 
         self._key_wrapper = RSAOAEPKeyWrapper(private_key.public_key(), private_key)
-        self._key_is_decoy = False
+        self._loaded_key_passphrase = passphrase_text.encode("utf-8")
         self._show_status("Private key loaded.")
         show_result_popup(self, "Private key loaded.", ok=True)
         self._update_view_button_state()
 
     # -- Viewing --------------------------------------------------------------
+
+    def _load_portable_metadata_source(
+        self, container_path: Path, key_wrapper: RSAOAEPKeyWrapper
+    ) -> Optional[tuple[PortableMetadataRepository, MetadataProtectionKeys]]:
+        """If `container_path`'s `.cusc` file has an embedded portable
+        metadata section (see the module docstring), derive this file's
+        protection keys from the loaded private key + its passphrase +
+        the section's own stored salt — entirely in RAM. The returned
+        repository is a drop-in for `self._metadata_repository`, so
+        validation, decryption, and one-time-access burning all work
+        exactly as they do against the local database, but only ever
+        touch this one container file.
+
+        Returns None (the caller falls back to the local repository) if
+        the container has no portable-metadata section, or the loaded
+        key/passphrase aren't usable to derive from — `getattr` rather
+        than a direct `.private_key` access since some tests stub
+        `_key_wrapper` with a bare sentinel object once
+        `SecureAccessService` itself is mocked out, same as a missing
+        private key: nothing to derive from.
+        """
+        private_key = getattr(key_wrapper, "private_key", None)
+        if private_key is None or self._loaded_key_passphrase is None:
+            return None
+
+        try:
+            container = self._portable_writer.read_container(container_path)
+        except (USBError, OSError) as exc:
+            logger.warning(
+                "Container at %s could not be read for portable metadata, falling back to the local "
+                "repository: %s",
+                container_path,
+                exc,
+            )
+            return None
+
+        if container.portable_metadata is None:
+            return None
+
+        material = rsa_keypair.private_key_material(private_key)
+        keys = derive_protection_keys_from_key_material(
+            material, self._loaded_key_passphrase, container.portable_metadata.salt
+        )
+        repository = PortableMetadataRepository(container, container_path, writer=self._portable_writer)
+        return repository, keys
 
     def _on_view_clicked(self) -> None:
         if self._selected_container is None or self._key_wrapper is None:
@@ -444,10 +533,7 @@ class DecryptionPage(BasePage):
             logger.warning("Decryption attempted without an authenticated session; refusing.")
             self._show_status("You must be signed in to view a file.", ok=False)
             return
-        is_decoy = self._session_manager.current.is_decoy or self._key_is_decoy
-        if self._metadata_repository is None and not is_decoy:
-            self._show_status("No metadata repository is available in this session.", ok=False)
-            return
+        is_decoy = self._session_manager.current.is_decoy
 
         # Snapshotted into locals rather than re-read from `self.` further
         # down: `progress_dialog` below pumps the Qt event loop (to keep
@@ -461,7 +547,32 @@ class DecryptionPage(BasePage):
         selected_device = self._selected_device
         key_wrapper = self._key_wrapper
         owner_id = self._session_manager.current.owner_id
-        is_decoy = self._session_manager.current.is_decoy or self._key_is_decoy
+
+        # A decoy session (a wrong login password — see
+        # security.auth_controller.authenticate_password) always takes
+        # the `force_deception` path below, which never touches any
+        # metadata source: skip deriving portable keys (a deliberately
+        # expensive scrypt call) and re-reading the container for
+        # nothing. A bad private key/passphrase is not special-cased
+        # here (see `_on_load_key_clicked`) — it runs through the exact
+        # same derivation and validation as a genuine key and fails on
+        # its own, so it never needs `force_deception`.
+        metadata_repository = self._metadata_repository
+        protection_keys = self._protection_keys
+        used_portable_metadata = False
+        if not is_decoy:
+            portable_source = self._load_portable_metadata_source(selected_container, key_wrapper)
+            if portable_source is not None:
+                metadata_repository, protection_keys = portable_source
+                used_portable_metadata = True
+                logger.info(
+                    "Using USB-resident portable metadata for %s — no local database involved",
+                    selected_container.name,
+                )
+        if metadata_repository is None and not is_decoy:
+            self._show_status("No metadata repository is available in this session.", ok=False)
+            return
+
         try:
             file_id, encrypted_bytes = self._storage_service.read_encrypted_file_bytes(selected_container)
         except (USBError, OSError) as exc:
@@ -469,8 +580,26 @@ class DecryptionPage(BasePage):
             self._show_status(f"Could not read {selected_container.name}: {exc}", ok=False)
             return
 
+        # This file has a separate local-database record in addition to the
+        # container's own embedded portable section just used above — a
+        # one-time-access burn must not leave that other copy looking
+        # untouched (see
+        # `metadata.one_time_access.OneTimeAccessEnforcer`'s
+        # `mirror_repositories`), or it could be legitimately decrypted
+        # again through the local copy alone.
+        mirror_repositories = []
+        if (
+            used_portable_metadata
+            and self._metadata_repository is not None
+            and self._metadata_repository.load(file_id) is not None
+        ):
+            mirror_repositories.append(self._metadata_repository)
+
         access_service = SecureAccessService(
-            self._metadata_repository, usage_tracker=self._usage_tracker, deception_engine=self._deception_engine
+            metadata_repository,
+            usage_tracker=self._usage_tracker,
+            deception_engine=self._deception_engine,
+            mirror_repositories=mirror_repositories,
         )
 
         viewer = SecureViewerWidget()
@@ -489,7 +618,7 @@ class DecryptionPage(BasePage):
                 file_id,
                 encrypted_bytes,
                 key_wrapper,
-                self._protection_keys,
+                protection_keys,
                 _on_granted,
                 current_device=selected_device,
                 current_usb_identifier=(
@@ -498,6 +627,7 @@ class DecryptionPage(BasePage):
                 current_machine_fingerprint=compute_machine_fingerprint(),
                 user=owner_id,
                 force_deception=is_decoy,
+                container_path=selected_container,
             )
 
         if not outcome.granted:
@@ -509,6 +639,13 @@ class DecryptionPage(BasePage):
                 file_id,
                 outcome.deception.trigger.value,
             )
+        else:
+            # A granted one-time-access view may have just deleted
+            # `selected_container` from the device (see `container_path`
+            # on `SecureAccessService.attempt_access`) — refresh
+            # immediately rather than waiting for the next device-poll
+            # tick, so the container table reflects that right away.
+            self._refresh_containers()
 
         # A local flag, not a widget attribute: `_on_capture_detected` and
         # `_on_viewer_closed` are both connected to signals the viewer
@@ -532,7 +669,6 @@ class DecryptionPage(BasePage):
             # its passphrase) before it can be used to view another file,
             # even a different container off the same device.
             self._key_wrapper = None
-            self._key_is_decoy = False
             self.key_path_label.setText("No private key loaded.")
             self.passphrase_edit.clear()
             self._update_view_button_state()

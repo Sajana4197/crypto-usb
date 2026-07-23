@@ -18,6 +18,21 @@ those checks need a local, queryable record independent of whatever
 `metadata_repository` provides. Both copies are protected with the
 same `protection_keys` and built from the same `FileMetadata`, so they
 never disagree.
+
+When `portable_metadata_keys`/`portable_metadata_salt` are also
+supplied (typically derived by the caller from the file-wrapping
+private key + a passphrase via
+`metadata.protection.derive_protection_keys_from_key_material` — see
+`ui.pages.encryption_page.EncryptionPage`), a *third* copy of the same
+`FileMetadata` is protected under those keys and embedded directly in
+the `.cusc` container as its portable-metadata section
+(`metadata.portable_envelope.PortableMetadataEnvelope`, part of
+`usb.secure_container.SecureContainer` — see that module). Unlike the
+local SQLite copy, this one travels with the device and can be
+re-derived and decrypted on any machine that has the private key and
+passphrase, with no local database, and no second file, required. It
+is additive: omitting these two parameters writes exactly as before,
+with no portable section.
 """
 
 from __future__ import annotations
@@ -34,6 +49,7 @@ from crypto.key_manager import KeyManager
 from crypto.key_wrapper import KeyWrapper
 from metadata.hashing import compute_integrity_hash
 from metadata.models import CURRENT_METADATA_VERSION, DeviceBinding, ExpiryRules, FileMetadata, UsagePolicy
+from metadata.portable_envelope import PortableMetadataEnvelope
 from metadata.protection import MetadataProtectionKeys, MetadataProtector, generate_protection_keys
 from metadata.repository import MetadataRepository
 from usb.device_detector import USBDevice
@@ -53,6 +69,7 @@ class SecureWriteResult:
     destination: Path
     container_size_bytes: int
     protection_keys: MetadataProtectionKeys
+    portable_metadata_embedded: bool = False
 
 
 class SecureStorageService:
@@ -80,6 +97,8 @@ class SecureStorageService:
         expiry_rules: Optional[ExpiryRules] = None,
         usage_policy: Optional[UsagePolicy] = None,
         bind_to_device: bool = False,
+        portable_metadata_keys: Optional[MetadataProtectionKeys] = None,
+        portable_metadata_salt: Optional[bytes] = None,
     ) -> SecureWriteResult:
         """Encrypt `source_path` and write it to `device` as a secure container.
 
@@ -95,7 +114,15 @@ class SecureStorageService:
         repository copy. When `bind_to_device` is True, this file can
         only ever be validated again from this same physical USB device
         and host machine (`validation.device_binding_validator`).
+
+        When `portable_metadata_keys` and `portable_metadata_salt` are
+        both given, a third protected copy of the same metadata is
+        embedded in the container's own portable-metadata section — see
+        the module docstring. Both must be supplied together; either one
+        alone is a caller error.
         """
+        if (portable_metadata_keys is None) != (portable_metadata_salt is None):
+            raise ValueError("portable_metadata_keys and portable_metadata_salt must be supplied together")
         source_path = Path(source_path)
         file_container = self._file_encryptor.encrypt_bytes(source_path.read_bytes(), key_wrapper)
 
@@ -133,8 +160,16 @@ class SecureStorageService:
         if metadata_repository is not None:
             metadata_repository.save(protected_metadata)
 
+        portable_metadata = None
+        if portable_metadata_keys is not None and portable_metadata_salt is not None:
+            portable_protected = MetadataProtector(portable_metadata_keys).protect(metadata)
+            portable_metadata = PortableMetadataEnvelope(salt=portable_metadata_salt, protected=portable_protected)
+
         container = SecureContainer(
-            file_id=file_id, file_container=file_container, protected_metadata=protected_metadata
+            file_id=file_id,
+            file_container=file_container,
+            protected_metadata=protected_metadata,
+            portable_metadata=portable_metadata,
         )
 
         destination = self._storage_writer.write_container(
@@ -153,6 +188,7 @@ class SecureStorageService:
             destination=destination,
             container_size_bytes=destination.stat().st_size,
             protection_keys=keys,
+            portable_metadata_embedded=portable_metadata is not None,
         )
 
     def read_encrypted_file_bytes(self, container_path: Path) -> tuple[str, bytes]:

@@ -18,14 +18,24 @@ import json
 import os
 from dataclasses import dataclass
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
+
 from core.logger import get_logger
 from crypto import aes_cipher
 from crypto.exceptions import DecryptionError
 from crypto.hmac_util import HMAC_KEY_SIZE_BYTES, compute_hmac, verify_hmac
 from metadata.exceptions import MetadataTamperError
 from metadata.models import FileMetadata
+from security.password_hasher import derive_vault_key_from_bytes
 
 logger = get_logger(__name__)
+
+# Distinct HKDF info labels so the encryption and HMAC subkeys are
+# cryptographically independent even though they're expanded from the
+# same master secret.
+_HKDF_INFO_ENCRYPTION_KEY = b"crypto-usb:metadata-protection:encryption-key"
+_HKDF_INFO_HMAC_KEY = b"crypto-usb:metadata-protection:hmac-key"
 
 
 @dataclass
@@ -40,6 +50,32 @@ def generate_protection_keys() -> MetadataProtectionKeys:
         encryption_key=aes_cipher.generate_fek(),
         hmac_key=os.urandom(HMAC_KEY_SIZE_BYTES),
     )
+
+
+def derive_protection_keys_from_key_material(
+    private_key_material: bytes, passphrase: bytes, salt: bytes
+) -> MetadataProtectionKeys:
+    """Derive metadata protection keys from a file-wrapping RSA private key
+    plus its passphrase, so the same keys can be regenerated on any machine
+    that has both — no protection key needs to be stored or transported on
+    its own.
+
+    Mirrors `security.password_hasher.derive_vault_key_from_bytes`: the
+    private key material and passphrase are combined and stretched with
+    scrypt under `salt`, then the resulting master secret is split into
+    independent AES and HMAC subkeys via HKDF, each with its own info
+    label. `salt` is not secret — it must be stored alongside the
+    protected metadata envelope (e.g. on the USB) so the same keys can be
+    re-derived later.
+    """
+    master_secret = derive_vault_key_from_bytes(private_key_material + passphrase, salt)
+    encryption_key = HKDFExpand(
+        algorithm=hashes.SHA256(), length=aes_cipher.AES_KEY_SIZE_BYTES, info=_HKDF_INFO_ENCRYPTION_KEY
+    ).derive(master_secret)
+    hmac_key = HKDFExpand(
+        algorithm=hashes.SHA256(), length=HMAC_KEY_SIZE_BYTES, info=_HKDF_INFO_HMAC_KEY
+    ).derive(master_secret)
+    return MetadataProtectionKeys(encryption_key=encryption_key, hmac_key=hmac_key)
 
 
 @dataclass

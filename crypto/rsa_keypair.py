@@ -55,6 +55,22 @@ def serialize_public_key(public_key: RSAPublicKey) -> bytes:
     )
 
 
+def private_key_material(private_key: RSAPrivateKey) -> bytes:
+    """Deterministic, unencrypted DER/PKCS8 bytes for `private_key` — for
+    in-memory key-derivation input only (see
+    `metadata.protection.derive_protection_keys_from_key_material`),
+    never written to disk. Unlike `serialize_private_key`, this is not
+    an export format: it carries no encryption, so the same key always
+    produces the same bytes, which is exactly what a deterministic KDF
+    input needs.
+    """
+    return private_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
 def load_private_key(pem_data: bytes | bytearray, passphrase: bytes | bytearray) -> RSAPrivateKey:
     """Load a private key from encrypted PEM. Raises CryptoError on bad data/passphrase."""
     try:

@@ -23,6 +23,18 @@ def mock_result_popup(monkeypatch):
     return mock
 
 
+@pytest.fixture(autouse=True)
+def mock_passphrase_prompt(monkeypatch):
+    """Deriving a file's portable metadata keys prompts for a passphrase
+    via `QInputDialog.getText` (see `_prompt_passphrase`)
+    -- autouse a valid default so existing write/export tests that don't
+    care about this don't hang on a real dialog. Tests that specifically
+    exercise passphrase behavior (cancel, too short) override this
+    locally with their own `patch.object(QInputDialog, "getText", ...)`.
+    """
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("a-valid-default-passphrase", True))
+
+
 def _make_page():
     QApplication.instance() or QApplication([])
     return EncryptionPage()
@@ -470,6 +482,312 @@ def test_export_key_write_failure_shows_error_instead_of_crashing(tmp_path):
         page._on_export_key_clicked()  # must not raise
 
     assert "failed to export" in page.status_label.text().lower()
+
+
+# -- Embedded portable metadata section (Phase B) ----------------------------
+
+
+def test_write_container_embeds_portable_metadata_section(tmp_path):
+    from usb.storage_writer import SecureStorageWriter
+
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"top secret contents")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+
+    page._on_write_clicked()
+
+    cusc_files = list(device_dir.glob("*.cusc"))
+    assert len(cusc_files) == 1
+    # One file total on the device -- the portable metadata section is
+    # embedded in the .cusc itself, not written as a second file.
+    assert len(list(device_dir.iterdir())) == 1
+    container = SecureStorageWriter().read_container(cusc_files[0])
+    assert container.portable_metadata is not None
+
+
+def test_portable_metadata_section_is_independently_loadable(tmp_path):
+    from crypto.rsa_keypair import private_key_material
+    from metadata.protection import MetadataProtector, derive_protection_keys_from_key_material
+    from usb.storage_writer import SecureStorageWriter
+
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"top secret contents")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+
+    page._on_write_clicked()
+
+    writer = SecureStorageWriter()
+    cusc_path = next(device_dir.glob("*.cusc"))
+    container = writer.read_container(cusc_path)
+    envelope = container.portable_metadata
+
+    # Simulates re-deriving on another machine: only the session private
+    # key + the passphrase entered at write time (the autouse default)
+    # plus the salt carried in the envelope itself are used.
+    material = private_key_material(page._key_wrapper.private_key)
+    rederived_keys = derive_protection_keys_from_key_material(
+        material, b"a-valid-default-passphrase", envelope.salt
+    )
+    restored = MetadataProtector(rederived_keys).unprotect(envelope.protected)
+
+    assert restored.file_id == container.file_id
+
+
+def test_passphrase_prompted_fresh_for_every_write(tmp_path, monkeypatch):
+    """Deliberately never cached (see the module docstring): two files
+    written in the same page session each get their own independent
+    passphrase prompt, so they can be protected by two different
+    passphrases if the user chooses to."""
+    from usb.storage_writer import SecureStorageWriter
+
+    prompt = MagicMock(return_value=("a-valid-default-passphrase", True))
+    monkeypatch.setattr(QInputDialog, "getText", prompt)
+
+    page = _make_page()
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+
+    source_a = tmp_path / "a.txt"
+    source_a.write_bytes(b"content a")
+    page._source_path = source_a
+    page._update_write_button_state()
+    page._on_write_clicked()
+
+    source_b = tmp_path / "b.txt"
+    source_b.write_bytes(b"content b")
+    page._source_path = source_b
+    page._update_write_button_state()
+    page._on_write_clicked()
+
+    assert prompt.call_count == 2
+    cusc_files = sorted(device_dir.glob("*.cusc"))
+    assert len(cusc_files) == 2
+    for path in cusc_files:
+        assert SecureStorageWriter().read_container(path).portable_metadata is not None
+
+
+def test_write_skips_portable_metadata_when_passphrase_prompt_cancelled(tmp_path, monkeypatch):
+    from usb.storage_writer import SecureStorageWriter
+
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("", False))
+
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+
+    page._on_write_clicked()
+
+    cusc_files = list(device_dir.glob("*.cusc"))
+    assert len(cusc_files) == 1
+    assert SecureStorageWriter().read_container(cusc_files[0]).portable_metadata is None
+    assert "verified" in page.status_label.text().lower()
+
+
+def test_write_skips_portable_metadata_when_passphrase_too_short(tmp_path, monkeypatch):
+    from usb.storage_writer import SecureStorageWriter
+
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("short", True))
+
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+
+    page._on_write_clicked()
+
+    cusc_files = list(device_dir.glob("*.cusc"))
+    assert len(cusc_files) == 1
+    assert SecureStorageWriter().read_container(cusc_files[0]).portable_metadata is None
+
+
+def test_export_prompts_fresh_when_nothing_was_just_written(tmp_path, monkeypatch):
+    """Export before any write this session has nothing to reuse, so it
+    prompts on its own -- and that does not pre-fill or skip a later
+    write's own (always-fresh) prompt either."""
+    from usb.storage_writer import SecureStorageWriter
+
+    page = _make_page()
+    pem_destination = tmp_path / "exported.pem"
+
+    with patch.object(QInputDialog, "getText", return_value=("export-passphrase-123", True)), \
+         patch.object(QFileDialog, "getSaveFileName", return_value=(str(pem_destination), "")):
+        page._on_export_key_clicked()
+
+    # A write immediately after must still prompt fresh -- export never
+    # caches anything for a later write to reuse.
+    prompt = MagicMock(return_value=("a-different-passphrase", True))
+    monkeypatch.setattr(QInputDialog, "getText", prompt)
+
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+
+    page._on_write_clicked()
+
+    prompt.assert_called_once()
+    cusc_files = list(device_dir.glob("*.cusc"))
+    assert len(cusc_files) == 1
+    assert SecureStorageWriter().read_container(cusc_files[0]).portable_metadata is not None
+
+
+def test_export_immediately_after_write_reuses_that_writes_passphrase(tmp_path, monkeypatch):
+    """The normal first-time-encrypt flow: write, then export -- export
+    must reuse the passphrase that write just prompted for, not ask a
+    second time for the same file."""
+    from crypto import rsa_keypair
+
+    prompt = MagicMock(return_value=("write-time-passphrase", True))
+    monkeypatch.setattr(QInputDialog, "getText", prompt)
+
+    page = _make_page()
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    page._source_path = source
+    page._update_write_button_state()
+    page._on_write_clicked()
+
+    assert prompt.call_count == 1
+
+    pem_destination = tmp_path / "exported.pem"
+    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(pem_destination), "")):
+        page._on_export_key_clicked()
+
+    # No second prompt, and the PEM was encrypted with the same
+    # passphrase the write just used.
+    prompt.assert_called_once()
+    assert pem_destination.exists()
+    rsa_keypair.load_private_key(pem_destination.read_bytes(), b"write-time-passphrase")
+
+
+def test_export_after_a_second_write_reuses_the_second_writes_passphrase(tmp_path, monkeypatch):
+    """Writing file B after file A must overwrite the one-write-deep
+    memory export reuses -- exporting after B must never silently use
+    A's (older, different) passphrase."""
+    from crypto import rsa_keypair
+
+    prompt = MagicMock(return_value=("passphrase-for-a", True))
+    monkeypatch.setattr(QInputDialog, "getText", prompt)
+
+    page = _make_page()
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+
+    source_a = tmp_path / "a.txt"
+    source_a.write_bytes(b"content a")
+    page._source_path = source_a
+    page._update_write_button_state()
+    page._on_write_clicked()
+
+    prompt.return_value = ("passphrase-for-b", True)
+    source_b = tmp_path / "b.txt"
+    source_b.write_bytes(b"content b")
+    page._source_path = source_b
+    page._update_write_button_state()
+    page._on_write_clicked()
+
+    assert prompt.call_count == 2
+
+    pem_destination = tmp_path / "exported.pem"
+    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(pem_destination), "")):
+        page._on_export_key_clicked()
+
+    assert prompt.call_count == 2  # still just the 2 write-time calls, no third
+    rsa_keypair.load_private_key(pem_destination.read_bytes(), b"passphrase-for-b")
+
+
+def test_export_prompts_fresh_after_a_cancelled_writes_passphrase(tmp_path, monkeypatch):
+    """A write whose own passphrase prompt was cancelled leaves nothing
+    for a following export to reuse -- export must not silently fall
+    back to some earlier, unrelated file's passphrase."""
+    page = _make_page()
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+
+    # File A: written with a real passphrase, populating the memory.
+    with patch.object(QInputDialog, "getText", return_value=("passphrase-for-a", True)):
+        source_a = tmp_path / "a.txt"
+        source_a.write_bytes(b"content a")
+        page._source_path = source_a
+        page._update_write_button_state()
+        page._on_write_clicked()
+
+    # File B: the portable-metadata prompt is cancelled this time.
+    with patch.object(QInputDialog, "getText", return_value=("", False)):
+        source_b = tmp_path / "b.txt"
+        source_b.write_bytes(b"content b")
+        page._source_path = source_b
+        page._update_write_button_state()
+        page._on_write_clicked()
+
+    # Export must now prompt fresh -- not silently reuse A's passphrase.
+    prompt = MagicMock(return_value=("export-time-passphrase", True))
+    monkeypatch.setattr(QInputDialog, "getText", prompt)
+    pem_destination = tmp_path / "exported.pem"
+    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(pem_destination), "")):
+        page._on_export_key_clicked()
+
+    prompt.assert_called_once()
 
 
 # -- Containers already on the selected device ------------------------------
