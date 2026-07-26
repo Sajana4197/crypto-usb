@@ -68,6 +68,19 @@ def test_list_file_ids_returns_all(repository):
     assert set(repository.list_file_ids()) == {"file-1", "file-2"}
 
 
+def test_delete_all_removes_every_record(repository):
+    repository.save(_sample_protected("file-1"))
+    repository.save(_sample_protected("file-2"))
+
+    assert repository.delete_all() == 2
+
+    assert repository.list_file_ids() == []
+
+
+def test_delete_all_on_empty_repository_returns_zero(repository):
+    assert repository.delete_all() == 0
+
+
 def test_repository_works_against_real_database_manager(tmp_path, monkeypatch):
     db_path = tmp_path / "crypto_usb.db"
     monkeypatch.setattr("database.db_manager.get_database_path", lambda: db_path)

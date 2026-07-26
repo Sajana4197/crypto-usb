@@ -96,3 +96,16 @@ class MetadataRepository:
     def list_file_ids(self) -> list[str]:
         cur = self._conn.execute("SELECT file_id FROM file_metadata ORDER BY stored_at")
         return [row[0] for row in cur.fetchall()]
+
+    def delete_all(self) -> int:
+        """Delete every metadata record. Used only by
+        `security.auth_controller.AuthController.delete_account` — local
+        account deletion resets this installation's metadata records
+        too, since a freshly registered account gets its own protection
+        keys and can never read records left behind by a deleted one
+        anyway (see that method's docstring)."""
+        cur = self._conn.execute("DELETE FROM file_metadata")
+        self._conn.commit()
+        if cur.rowcount:
+            logger.info("Deleted all %d metadata record(s)", cur.rowcount)
+        return cur.rowcount

@@ -14,11 +14,11 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtGui import QAction, QIcon
-from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QMainWindow, QStackedWidget, QWidget
 
 from app.config import ConfigManager
 from app.protection_keys import load_or_create_metadata_protection_keys, load_or_create_tracking_protection_keys
-from core.constants import APP_NAME, APP_VERSION
+from core.constants import APP_NAME, APP_VERSION, LOCAL_OWNER_ID
 from core.logger import get_logger
 from crypto.secure_cleanup import CleanupReason, cleanup
 from database.db_manager import DatabaseManager
@@ -30,6 +30,7 @@ from security.auth_controller import AuthController
 from security.auth_session import SessionManager
 from tracking.repository import TrackingRepository
 from tracking.tracking_service import UsageTracker
+from ui.dialogs.auth_dialog import AuthDialog
 from ui.navigation.navigation_panel import DEFAULT_NAV_ITEMS, NavigationPanel
 from ui.pages.dashboard_page import DashboardPage
 from ui.pages.deception_page import DeceptionPage
@@ -83,16 +84,17 @@ class MainWindow(QMainWindow):
 
         current_session = self.session_manager.current if self.session_manager else None
         current_owner_id = current_session.owner_id if current_session else None
-        auth_controller = (
+        self.auth_controller = (
             AuthController(account_repository, db_manager=self.db_manager) if account_repository is not None else None
         )
 
         self.settings_page = SettingsPage(
             current_theme=theme_manager.current_theme,
-            auth_controller=auth_controller,
+            auth_controller=self.auth_controller,
             owner_id=current_owner_id,
         )
         self.settings_page.theme_changed.connect(self._on_theme_changed)
+        self.settings_page.account_deleted.connect(self._on_account_deleted)
 
         self._pages = {
             "dashboard": DashboardPage(
@@ -210,6 +212,53 @@ class MainWindow(QMainWindow):
     def _on_theme_changed(self, theme: str) -> None:
         self._theme_manager.apply(theme)
         self._config_manager.update(theme=theme)
+
+    def _on_account_deleted(self) -> None:
+        """`SettingsPage.account_deleted` fired: the local account was just
+        removed (`security.auth_controller.AuthController.delete_account`).
+        Drop the now-stale session, show `AuthDialog` again — which,
+        finding no account, presents "Create Account" rather than "Sign
+        In" — and, once a new one is registered, replace this window
+        with a fresh `MainWindow` built from that new session.
+
+        Uses `hide()`/`deleteLater()` rather than `close()` for this
+        window: `close()` would run `closeEvent`'s
+        `_perform_exit_cleanup`, which clears `session_manager` — the
+        very session this method is about to populate for the
+        replacement window — and is meant for actually exiting the
+        application, not this mid-session handoff. Hidden *before*
+        `AuthDialog` is shown, not after — otherwise this whole window,
+        still full of the just-deleted account's data, stays visible
+        behind the dialog for the entire time the user is creating a
+        new account.
+        """
+        logger.warning("Local account deleted via Settings; returning to account creation")
+        if self.session_manager is not None:
+            self.session_manager.clear()
+        self.hide()
+
+        auth_dialog = AuthDialog(self.auth_controller, owner_id=LOCAL_OWNER_ID)
+        if auth_dialog.exec() != QDialog.DialogCode.Accepted or auth_dialog.session is None:
+            logger.info("Account creation was not completed after account deletion; exiting")
+            QApplication.instance().quit()
+            return
+
+        if self.session_manager is not None:
+            self.session_manager.set(auth_dialog.session)
+
+        replacement = MainWindow(
+            self._config_manager, self._theme_manager, db_manager=self.db_manager, session_manager=self.session_manager
+        )
+        # `replacement` has no other Python owner once this method
+        # returns — a parentless top-level `QWidget` would otherwise be
+        # garbage-collected out from under its still-visible native
+        # window. Stashed on the (process-lifetime) `QApplication`
+        # instance rather than a module-level global, since that's
+        # already the object every part of this app can reach.
+        QApplication.instance()._crypto_usb_main_window = replacement
+        replacement.show()
+
+        self.deleteLater()
 
     def closeEvent(self, event) -> None:
         self._config_manager.update(

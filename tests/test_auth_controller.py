@@ -413,6 +413,128 @@ def test_change_password_locks_after_repeated_wrong_current_password(controller)
         controller.change_password("owner-1", "correct-password", "new-correct-password")
 
 
+# -- Delete account -----------------------------------------------------------
+
+
+def test_delete_account_success(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    controller.delete_account("owner-1", "correct-password")
+
+    assert controller.has_account("owner-1") is False
+
+
+def test_delete_account_wrong_password_raises_and_does_not_delete(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.delete_account("owner-1", "wrong-password")
+
+    assert controller.has_account("owner-1") is True
+
+
+def test_delete_account_wrong_password_counts_as_failed_attempt(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.delete_account("owner-1", "wrong-password")
+
+    account = controller.get_account("owner-1")
+    assert account.failed_attempts == 1
+
+
+def test_delete_account_locks_after_repeated_wrong_password(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    for _ in range(MAX_FAILED_ATTEMPTS):
+        with pytest.raises(InvalidCredentialsError):
+            controller.delete_account("owner-1", "wrong-password")
+
+    with pytest.raises(AccountLockedError):
+        controller.delete_account("owner-1", "correct-password")
+
+    # Never actually deleted -- the account is locked, not gone.
+    assert controller.has_account("owner-1") is True
+
+
+def test_delete_account_against_private_key_account_raises(controller, rsa_keypair_fixture):
+    public_pem = rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
+    controller.register_private_key_account("owner-1", public_pem)
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.delete_account("owner-1", "any-password")
+
+    assert controller.has_account("owner-1") is True
+
+
+def test_delete_account_missing_account_raises(controller):
+    with pytest.raises(AccountNotFoundError):
+        controller.delete_account("no-such-owner", "any-password")
+
+
+def test_delete_account_with_db_manager_resets_metadata_tracking_and_deception_data(
+    controller_with_db, db_manager
+):
+    """Deleting the account is a full local reset (see `delete_account`'s
+    docstring): leftover metadata/tracking/deception data a freshly
+    registered account could never read anyway must not linger and
+    trip a false tamper alarm on the next login."""
+    from datetime import datetime, timezone
+
+    from deception.content_types import DeceptionContentType
+    from deception.event_repository import DeceptionEventRepository
+    from deception.triggers import DeceptionTrigger
+    from metadata.protection import ProtectedMetadata
+    from metadata.repository import MetadataRepository
+    from tracking.repository import TrackingRepository
+    from tracking.tamper_evident_log import GENESIS_HMAC, TrackingProtectionKeys, TamperEvidentLog
+
+    controller_with_db.register_password_account("owner-1", "correct-password")
+    conn = db_manager.connect()
+
+    MetadataRepository(conn).save(
+        ProtectedMetadata(
+            file_id="file-1", metadata_version=1, nonce=b"n" * 12, ciphertext=b"c", hmac_tag=b"h" * 32
+        )
+    )
+
+    tracking_repo = TrackingRepository(conn)
+    log = TamperEvidentLog(TrackingProtectionKeys(encryption_key=b"k" * 32, hmac_key=b"m" * 32))
+    from tracking.models import UsageRecord
+
+    record = UsageRecord(
+        session_id="session-1", user="owner-1", machine_id="machine-1", file_id="file-1",
+        login_time=datetime.now(timezone.utc),
+    )
+    entry = log.seal(record, GENESIS_HMAC)
+    tracking_repo.append("session-1", entry)
+
+    DeceptionEventRepository(conn).record(
+        DeceptionTrigger.WRONG_CREDENTIALS, DeceptionContentType.FAKE_TEXT, None, datetime.now(timezone.utc)
+    )
+
+    assert MetadataRepository(conn).list_file_ids() != []
+    assert TrackingRepository(conn).count() != 0
+    assert DeceptionEventRepository(conn).count() != 0
+
+    controller_with_db.delete_account("owner-1", "correct-password")
+
+    assert MetadataRepository(conn).list_file_ids() == []
+    assert TrackingRepository(conn).count() == 0
+    assert DeceptionEventRepository(conn).count() == 0
+
+
+def test_delete_account_without_db_manager_does_not_raise(controller):
+    """No `db_manager` (e.g. a bare controller in a unit test) must not
+    crash `delete_account` -- it just skips the reset step it has no
+    connection to perform."""
+    controller.register_password_account("owner-1", "correct-password")
+
+    controller.delete_account("owner-1", "correct-password")
+
+    assert controller.has_account("owner-1") is False
+
+
 # -- Reset password with recovery code ---------------------------------------
 
 

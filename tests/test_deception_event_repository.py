@@ -77,3 +77,17 @@ def test_every_trigger_and_content_type_round_trips(repository):
 def test_repository_exposes_no_update_or_delete_method(repository):
     assert not hasattr(repository, "update")
     assert not hasattr(repository, "delete")
+
+
+def test_clear_removes_every_event(repository):
+    repository.record(DeceptionTrigger.WRONG_CREDENTIALS, DeceptionContentType.FAKE_TEXT, "file-1", datetime.now(timezone.utc))
+    repository.record(DeceptionTrigger.ACCESS_ALREADY_USED, DeceptionContentType.FAKE_PDF, "file-2", datetime.now(timezone.utc))
+
+    assert repository.clear() == 2
+
+    assert repository.count() == 0
+    assert repository.list_events() == []
+
+
+def test_clear_on_empty_repository_returns_zero(repository):
+    assert repository.clear() == 0

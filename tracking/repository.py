@@ -2,10 +2,19 @@
 
 Owns its own table schema against a shared connection, following the
 same pattern as `metadata.repository.MetadataRepository`. Deliberately
-exposes no update or delete: the tamper-evidence the hash chain
-provides only means something if entries are genuinely append-only —
-anything that could rewrite history through this repository's own API
-would defeat the point.
+exposes no per-entry update or delete: the tamper-evidence the hash
+chain provides only means something if entries are genuinely
+append-only — selectively rewriting or removing individual entries
+through this repository's own API would defeat the point.
+
+`clear()` is the one deliberate, narrow exception: an all-or-nothing
+wipe of the entire log, used only by
+`security.auth_controller.AuthController.delete_account`. Deleting the
+local account is an explicit, user-initiated full reset of this
+installation, not a way to selectively edit history — accepted as a
+trade-off there (see that method's docstring) rather than leaving
+behind entries a freshly registered account could never verify anyway,
+which would otherwise surface as a false tamper alarm.
 """
 
 from __future__ import annotations
@@ -82,3 +91,13 @@ class TrackingRepository:
     def count(self) -> int:
         cur = self._conn.execute("SELECT COUNT(*) FROM usage_log")
         return cur.fetchone()[0]
+
+    def clear(self) -> int:
+        """Delete every entry — the one exception to this repository's
+        append-only design (see the module docstring). Whole-log-only:
+        there is no way to remove or edit a single entry."""
+        cur = self._conn.execute("DELETE FROM usage_log")
+        self._conn.commit()
+        if cur.rowcount:
+            logger.warning("Cleared entire usage log (%d entries deleted)", cur.rowcount)
+        return cur.rowcount

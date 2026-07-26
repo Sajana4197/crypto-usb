@@ -27,7 +27,9 @@ from core.logger import get_logger
 from crypto.secure_cleanup import CleanupReason, cleanup
 from database.db_manager import DatabaseManager
 from deception.deception_engine import DeceptionEngine
+from deception.event_repository import DeceptionEventRepository
 from deception.triggers import DeceptionTrigger
+from metadata.repository import MetadataRepository
 from security import password_hasher
 from security.account_repository import AccountRepository
 from security.exceptions import (
@@ -40,6 +42,7 @@ from security.key_authenticator import KeyAuthenticator, generate_challenge
 from security.lockout_policy import LockoutPolicy
 from security.models import AuthMethod, PasswordCredential, PrivateKeyCredential, UserAccount
 from security.auth_session import AuthSession
+from tracking.repository import TrackingRepository
 
 logger = get_logger(__name__)
 
@@ -230,6 +233,53 @@ class AuthController:
             )
             logger.info("Password changed for owner_id=%s", owner_id)
             return account, recovery_code
+
+        self._fail(account, "current password")
+        raise InvalidCredentialsError("Incorrect current password")
+
+    def delete_account(self, owner_id: str, current_password: str) -> None:
+        """Verify `current_password`, then permanently delete the local
+        account and reset this installation's protected data. Subject to
+        the same lockout policy as a normal password sign-in. Raises
+        `AccountNotFoundError`, `AccountLockedError`, or
+        `InvalidCredentialsError` (wrong current password) — like
+        `change_password`, this re-confirms an already authenticated
+        user rather than gating a login, so a wrong password is reported
+        honestly here rather than through the Deception Engine.
+
+        This app only ever has one local account at a time (see
+        `core.constants.LOCAL_OWNER_ID`), so "delete the account" is
+        treated as a full local reset rather than leaving orphaned data
+        behind: a freshly registered account gets its own Vault Master
+        Key and could never read the old account's metadata or tracking
+        log anyway (same as any credential rotation it wasn't wrapped
+        under), and letting that unreadable data linger doesn't just sit
+        there quietly — `tracking.tracking_service.UsageTracker.verify_log_integrity`
+        HMAC-verifies every entry with the *current* keys, so old entries
+        it can no longer verify surface as a false "tampered" alarm
+        indistinguishable from a real one. When this controller was
+        constructed with a `db_manager`, this method also clears every
+        metadata record (`metadata.repository.MetadataRepository.delete_all`),
+        the entire tamper-evident usage log
+        (`tracking.repository.TrackingRepository.clear`), and every
+        deception-event record (`deception.event_repository.DeceptionEventRepository.clear`)
+        — a deliberate, explicit exception to the usage log's normal
+        append-only guarantee (see that repository's module docstring),
+        accepted here because account deletion is a full, user-initiated
+        reset, not a way to selectively edit history.
+        """
+        account = self._require_unlocked_account(owner_id, AuthMethod.PASSWORD)
+
+        assert isinstance(account.credential, PasswordCredential)
+        if password_hasher.verify_password(current_password, account.credential):
+            if self._db_manager is not None:
+                conn = self._db_manager.connect()
+                MetadataRepository(conn).delete_all()
+                TrackingRepository(conn).clear()
+                DeceptionEventRepository(conn).clear()
+            self._repository.delete(owner_id)
+            logger.warning("Deleted account for owner_id=%s and reset local protected data", owner_id)
+            return
 
         self._fail(account, "current password")
         raise InvalidCredentialsError("Incorrect current password")

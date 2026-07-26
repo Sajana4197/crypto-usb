@@ -100,3 +100,13 @@ class DeceptionEventRepository:
     def count(self) -> int:
         cur = self._conn.execute("SELECT COUNT(*) FROM deception_events")
         return cur.fetchone()[0]
+
+    def clear(self) -> int:
+        """Delete every recorded event. Used only by
+        `security.auth_controller.AuthController.delete_account` as part
+        of a full local reset — see that method's docstring."""
+        cur = self._conn.execute("DELETE FROM deception_events")
+        self._conn.commit()
+        if cur.rowcount:
+            logger.info("Cleared all %d deception event record(s)", cur.rowcount)
+        return cur.rowcount

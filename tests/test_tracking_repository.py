@@ -85,3 +85,18 @@ def test_count_reflects_number_of_appends(repository, log):
 def test_repository_exposes_no_update_or_delete_method(repository):
     assert not hasattr(repository, "update")
     assert not hasattr(repository, "delete")
+
+
+def test_clear_removes_every_entry(repository, log):
+    for i in range(3):
+        repository.append(f"session-{i}", log.seal(_record(f"session-{i}")))
+
+    assert repository.clear() == 3
+
+    assert repository.count() == 0
+    assert repository.list_entries() == []
+    assert repository.last_entry_hmac() == GENESIS_HMAC
+
+
+def test_clear_on_empty_log_returns_zero(repository):
+    assert repository.clear() == 0
