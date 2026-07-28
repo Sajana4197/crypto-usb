@@ -20,7 +20,7 @@ import pytest
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
 
 from deception.triggers import DeceptionTrigger
-from metadata.models import UsagePolicy
+from metadata.models import MachineBindingMode, UsagePolicy
 from metadata.protection import generate_protection_keys
 from metadata.repository import MetadataRepository
 from security.account_repository import AccountRepository
@@ -144,7 +144,8 @@ def test_full_demo_script(app, tmp_path, auth_controller, metadata_repository, p
         owner_id=session.owner_id,
         metadata_repository=metadata_repository,
         protection_keys=protection_keys,
-        bind_to_device=True,
+        bind_device=True,
+        machine_binding=MachineBindingMode.CURRENT,
         usage_policy=UsagePolicy(one_time_access=True),
     )
     written = device_dir / f"{result.file_id}.cusc"

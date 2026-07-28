@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -78,15 +79,18 @@ from PySide6.QtWidgets import (
 
 from core.logger import get_logger
 from crypto import rsa_keypair
-from crypto.exceptions import CryptoError
+from crypto.exceptions import CryptoError, KeyUnwrappingError
 from crypto.key_wrapper import RSAOAEPKeyWrapper
 from deception.deception_engine import DeceptionEngine
 from deception.event_repository import DeceptionEventRepository
 from deception.triggers import DeceptionTrigger
+from metadata.device_rebind import DeviceRebindService
+from metadata.exceptions import MetadataTamperError
 from metadata.portable_repository import PortableMetadataRepository
-from metadata.protection import MetadataProtectionKeys, derive_protection_keys_from_key_material
+from metadata.protection import MetadataProtectionKeys, MetadataProtector, derive_protection_keys_from_key_material
 from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
+from security.device_mismatch_throttle import DeviceMismatchThrottle
 from tracking.tracking_service import UsageTracker
 from ui.pages.base_page import BasePage
 from ui.widgets.busy import progress_dialog, show_info_popup, show_result_popup
@@ -96,7 +100,7 @@ from usb.secure_access_service import SecureAccessService
 from usb.secure_storage_service import SecureStorageService
 from usb.storage_writer import SecureStorageWriter
 from validation.machine_fingerprint import compute_machine_fingerprint
-from validation.usb_identifier import compute_usb_identifier
+from validation.usb_identifier import compute_hardware_descriptor, compute_usb_identifier
 from viewer.secure_viewer_widget import SecureViewerWidget
 
 logger = get_logger(__name__)
@@ -117,6 +121,7 @@ _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8"
 _GIF_MAGICS = (b"GIF87a", b"GIF89a")
 _PDF_MAGIC = b"%PDF-"
+_ISO_BMFF_BOX_TYPE = b"ftyp"
 
 
 def _sniff_content_type(content: bytes) -> str:
@@ -137,6 +142,12 @@ def _sniff_content_type(content: bytes) -> str:
         return "image/jpeg"
     if content[:6] in _GIF_MAGICS:
         return "image/gif"
+    # ISO Base Media File Format (MP4, M4V, and QuickTime-family MOV files
+    # all share this container): a 4-byte big-endian box size, then the
+    # 4-byte box type "ftyp" identifying the file-type box that every
+    # such file starts with.
+    if content[4:8] == _ISO_BMFF_BOX_TYPE:
+        return "video/mp4"
     try:
         content.decode("utf-8")
         return "text/plain"
@@ -176,6 +187,12 @@ class DecryptionPage(BasePage):
         # the engine still fabricates decoy content, it just has nowhere to
         # log the activation, exactly as before this repository existed.
         self._deception_engine = DeceptionEngine(event_repository=deception_event_repository)
+        # A single throttle instance per page, so repeated device-mismatch
+        # attempts against the same file actually accumulate across
+        # separate view attempts (see security.device_mismatch_throttle) —
+        # a fresh SecureAccessService is constructed on every view click,
+        # so this state must live here instead, one level up.
+        self._device_mismatch_throttle = DeviceMismatchThrottle()
 
         self._devices: list[USBDevice] = []
         self._selected_device: USBDevice | None = None
@@ -302,12 +319,29 @@ class DecryptionPage(BasePage):
 
         layout.addSpacing(10)
 
+        button_row = QHBoxLayout()
+
         self.view_button = QPushButton("View Selected File")
         self.view_button.setObjectName("primaryButton")
         self.view_button.setEnabled(False)
         self.view_button.clicked.connect(self._on_view_clicked)
         self.view_button.setMaximumWidth(220)
-        layout.addWidget(self.view_button)
+        button_row.addWidget(self.view_button)
+
+        self.rebind_button = QPushButton("Rebind to Selected Device")
+        self.rebind_button.setEnabled(False)
+        self.rebind_button.setToolTip(
+            "Explicitly move this file's device binding to the currently selected "
+            "device -- e.g. after the original USB stick died or was replaced. "
+            "Requires re-entering the private-key passphrase. Never happens "
+            "automatically: an ordinary device mismatch still denies access as usual."
+        )
+        self.rebind_button.clicked.connect(self._on_rebind_clicked)
+        self.rebind_button.setMaximumWidth(220)
+        button_row.addWidget(self.rebind_button)
+
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
 
         return panel
 
@@ -424,9 +458,9 @@ class DecryptionPage(BasePage):
         self._update_view_button_state()
 
     def _update_view_button_state(self) -> None:
-        self.view_button.setEnabled(
-            self._selected_container is not None and self._key_wrapper is not None
-        )
+        enabled = self._selected_container is not None and self._key_wrapper is not None
+        self.view_button.setEnabled(enabled)
+        self.rebind_button.setEnabled(enabled)
 
     # -- Private key loading -------------------------------------------------
 
@@ -600,6 +634,7 @@ class DecryptionPage(BasePage):
             usage_tracker=self._usage_tracker,
             deception_engine=self._deception_engine,
             mirror_repositories=mirror_repositories,
+            device_mismatch_throttle=self._device_mismatch_throttle,
         )
 
         viewer = SecureViewerWidget()
@@ -625,6 +660,9 @@ class DecryptionPage(BasePage):
                     compute_usb_identifier(selected_device) if selected_device else None
                 ),
                 current_machine_fingerprint=compute_machine_fingerprint(),
+                current_hardware_descriptor=(
+                    compute_hardware_descriptor(selected_device) if selected_device else None
+                ),
                 user=owner_id,
                 force_deception=is_decoy,
                 container_path=selected_container,
@@ -680,6 +718,114 @@ class DecryptionPage(BasePage):
 
         viewer.show()
         self._show_status(f"Opened {selected_container.name} in the secure viewer.")
+
+    # -- Explicit device rebind (Phase 6) --------------------------------------
+
+    def _on_rebind_clicked(self) -> None:
+        """Deliberately move this file's device binding to whatever
+        device is currently selected — e.g. the originally enrolled USB
+        stick died or was replaced. This is a wholly separate action
+        from `_on_view_clicked`: an ordinary device mismatch there still
+        denies access and activates the Deception Engine exactly as
+        before. Rebinding only ever happens here, and only when the
+        user explicitly clicks this button and re-confirms the private
+        key's passphrase — see `metadata.device_rebind.DeviceRebindService`
+        for why that re-entry is not just a UI formality.
+        """
+        if self._selected_container is None or self._selected_device is None:
+            return
+        if self._session_manager is None or not self._session_manager.is_authenticated:
+            self._show_status("You must be signed in to rebind a file.", ok=False)
+            return
+
+        path_text = self.key_path_label.text()
+        if not path_text or path_text == "No private key loaded.":
+            self._show_status("Choose and load a private key file first.", ok=False)
+            return
+
+        if self._metadata_repository is None:
+            self._show_status("No metadata repository is available in this session.", ok=False)
+            return
+
+        passphrase_text, confirmed = QInputDialog.getText(
+            self,
+            "Confirm Rebind",
+            "Re-enter the private-key passphrase to confirm rebinding this file:",
+            QLineEdit.EchoMode.Password,
+        )
+        if not confirmed or not passphrase_text:
+            self._show_status("Rebind cancelled.")
+            return
+
+        selected_container = self._selected_container
+        selected_device = self._selected_device
+        owner_id = self._session_manager.current.owner_id
+
+        try:
+            file_id, _ = self._storage_service.read_encrypted_file_bytes(selected_container)
+        except (USBError, OSError) as exc:
+            self._show_status(f"Could not read {selected_container.name}: {exc}", ok=False)
+            return
+
+        protected = self._metadata_repository.load(file_id)
+        if protected is None:
+            self._show_status("No metadata record found for this file in this session.", ok=False)
+            return
+
+        try:
+            metadata = MetadataProtector(self._protection_keys).unprotect(protected)
+        except MetadataTamperError as exc:
+            self._show_status(f"Metadata failed its integrity check: {exc}", ok=False, important=True)
+            return
+
+        if not metadata.device_binding.bound:
+            self._show_status(
+                "This file is not bound to any device (portable mode) — nothing to rebind.", ok=False
+            )
+            return
+        previous_usb_id = metadata.device_binding.usb_serial
+
+        try:
+            private_pem = Path(path_text).read_bytes()
+        except OSError as exc:
+            self._show_status(f"Could not read the private key file: {exc}", ok=False)
+            return
+
+        rebind_service = DeviceRebindService(self._metadata_repository)
+        try:
+            rebind_service.rebind(
+                metadata,
+                private_pem,
+                passphrase_text.encode("utf-8"),
+                self._protection_keys,
+                new_device=selected_device,
+                old_device=selected_device,
+            )
+        except (CryptoError, KeyUnwrappingError):
+            # Honest failure, not routed through the Deception Engine —
+            # this re-confirms an already-authenticated session (like
+            # security.auth_controller.AuthController.change_password),
+            # it does not gate a fresh login.
+            logger.warning("Rebind failed for file_id=%s: incorrect passphrase or key material", file_id)
+            self._show_status("Rebind failed: incorrect passphrase or key material.", ok=False, important=True)
+            return
+        except ValueError as exc:
+            self._show_status(f"Rebind failed: {exc}", ok=False, important=True)
+            return
+
+        if self._usage_tracker is not None:
+            self._usage_tracker.record_device_rebind(
+                user=owner_id,
+                machine_id=compute_machine_fingerprint(),
+                file_id=file_id,
+                previous_usb_id=previous_usb_id,
+                new_usb_id=metadata.device_binding.usb_serial,
+            )
+
+        self._show_status(
+            f"Rebound {selected_container.name} to {selected_device.mount_point}.", important=True
+        )
+        self._refresh_containers()
 
     # -- Status ------------------------------------------------------------
 

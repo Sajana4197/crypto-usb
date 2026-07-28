@@ -206,6 +206,76 @@ def test_verify_log_integrity_detects_a_direct_database_edit(tracker, connection
     assert result.verified_count == 1
 
 
+# -- Device rebind events (Phase 6) -----------------------------------------
+
+
+def test_record_device_rebind_returns_a_record_with_the_expected_shape(tracker):
+    record = tracker.record_device_rebind(
+        user="alice", machine_id="m", file_id="file-1", previous_usb_id="usb-old", new_usb_id="usb-new"
+    )
+
+    assert record.event_type == "device_rebind"
+    assert record.previous_usb_id == "usb-old"
+    assert record.usb_id == "usb-new"
+    assert record.file_id == "file-1"
+    assert record.user == "alice"
+    assert record.authentication_result is True
+    assert record.login_time == record.close_time
+    assert record.duration_seconds == 0.0
+
+
+def test_record_device_rebind_persists_to_the_repository(tracker, repository):
+    tracker.record_device_rebind(
+        user="alice", machine_id="m", file_id="file-1", previous_usb_id="usb-old", new_usb_id="usb-new"
+    )
+
+    assert repository.count() == 1
+
+
+def test_record_device_rebind_is_readable_back_with_its_event_type(tracker):
+    tracker.record_device_rebind(
+        user="alice", machine_id="m", file_id="file-1", previous_usb_id="usb-old", new_usb_id="usb-new"
+    )
+
+    [stored] = tracker.read_all_records()
+    assert stored.event_type == "device_rebind"
+    assert stored.previous_usb_id == "usb-old"
+    assert stored.usb_id == "usb-new"
+
+
+def test_ordinary_access_records_default_to_the_access_event_type(tracker):
+    record = tracker.start_session(user="alice", machine_id="m", file_id="f")
+    tracker.record_close(record)
+
+    [stored] = tracker.read_all_records()
+    assert stored.event_type == "access"
+    assert stored.previous_usb_id is None
+
+
+def test_device_rebind_chains_onto_the_existing_log_without_breaking_it(tracker):
+    """Reuses the same tamper-evident chain as ordinary session records --
+    interleaving both kinds must still verify cleanly."""
+    first = tracker.start_session(user="alice", machine_id="m", file_id="file-1")
+    tracker.record_close(first)
+    tracker.record_device_rebind(user="alice", machine_id="m", file_id="file-1", previous_usb_id="a", new_usb_id="b")
+    second = tracker.start_session(user="alice", machine_id="m", file_id="file-1")
+    tracker.record_close(second)
+
+    result = tracker.verify_log_integrity()
+    assert result.ok is True
+    assert result.verified_count == 3
+
+    records = tracker.read_all_records()
+    assert [r.event_type for r in records] == ["access", "device_rebind", "access"]
+
+
+def test_device_rebind_without_a_repository_does_not_raise(tracker_without_repository):
+    record = tracker_without_repository.record_device_rebind(
+        user="alice", machine_id="m", file_id="file-1", previous_usb_id="a", new_usb_id="b"
+    )
+    assert record.event_type == "device_rebind"
+
+
 def test_verify_log_integrity_detects_a_direct_row_deletion(tracker, connection):
     for i in range(3):
         record = tracker.start_session(user=f"user-{i}", machine_id="m", file_id="f")

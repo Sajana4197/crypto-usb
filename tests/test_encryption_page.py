@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
 
+from metadata.models import MachineBindingMode
 from ui.pages.encryption_page import EncryptionPage
 from usb.device_detector import USBDevice
 from usb.exceptions import ContainerOverwriteError, USBError
@@ -377,6 +378,163 @@ def test_write_container_with_checkbox_unchecked_passes_one_time_access_false(tm
     page._on_write_clicked()
 
     assert captured["usage_policy"].one_time_access is False
+
+
+# -- Device/machine binding controls (Phase 1, reworked as independent axes
+# in Phase 7) -----------------------------------------------------------
+
+
+def test_bind_device_checkbox_defaults_checked():
+    page = _make_page()
+    assert page.bind_device_checkbox.isChecked() is True
+
+
+def test_machine_binding_combo_defaults_to_current_machine():
+    page = _make_page()
+    assert page._selected_machine_binding() is MachineBindingMode.CURRENT
+
+
+def test_write_container_passes_default_binding_to_store_file(tmp_path, monkeypatch):
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+
+    captured = {}
+    _stub_store_file(monkeypatch, page, device_dir, captured)
+
+    page._on_write_clicked()
+
+    # Out of the box (device checkbox on, "this machine" selected) matches
+    # this app's original hardcoded device+machine behavior.
+    assert captured["bind_device"] is True
+    assert captured["machine_binding"] is MachineBindingMode.CURRENT
+
+
+@pytest.mark.parametrize(
+    "combo_index,expected_mode",
+    [
+        (0, MachineBindingMode.CURRENT),
+        (1, MachineBindingMode.NONE),
+    ],
+)
+def test_write_container_passes_selected_machine_binding_to_store_file(
+    tmp_path, monkeypatch, combo_index, expected_mode
+):
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+    page.machine_binding_combo.setCurrentIndex(combo_index)
+
+    captured = {}
+    _stub_store_file(monkeypatch, page, device_dir, captured)
+
+    page._on_write_clicked()
+
+    assert captured["machine_binding"] is expected_mode
+
+
+def test_unchecking_device_binding_passes_bind_device_false(tmp_path, monkeypatch):
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+    page.bind_device_checkbox.setChecked(False)
+
+    captured = {}
+    _stub_store_file(monkeypatch, page, device_dir, captured)
+
+    page._on_write_clicked()
+
+    assert captured["bind_device"] is False
+
+
+def test_specific_machine_binding_passes_the_entered_fingerprint(tmp_path, monkeypatch):
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+    page.machine_binding_combo.setCurrentIndex(2)  # "Bind to a specific machine..."
+    page.target_machine_fingerprint_edit.setText("copied-fingerprint")
+
+    captured = {}
+    _stub_store_file(monkeypatch, page, device_dir, captured)
+
+    page._on_write_clicked()
+
+    assert captured["machine_binding"] is MachineBindingMode.SPECIFIC
+    assert captured["target_machine_fingerprint"] == "copied-fingerprint"
+
+
+def test_specific_machine_binding_without_a_fingerprint_blocks_the_write(tmp_path, monkeypatch):
+    page = _make_page()
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"content")
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+
+    page._devices = [device]
+    page._populate_table()
+    page.table.selectRow(0)
+    page._source_path = source
+    page._update_write_button_state()
+    page.machine_binding_combo.setCurrentIndex(2)  # "Bind to a specific machine..." left blank
+
+    captured = {}
+    _stub_store_file(monkeypatch, page, device_dir, captured)
+
+    page._on_write_clicked()
+
+    assert captured == {}
+    assert "fingerprint" in page.status_label.text().lower()
+
+
+def test_choosing_specific_machine_binding_reveals_the_fingerprint_field():
+    # `isHidden()` (an explicit-state flag, unlike `isVisible()`) is
+    # checked rather than shown on screen -- this test never calls
+    # `page.show()`, so `isVisible()` would report False regardless of
+    # `setVisible()` calls here, since it also depends on every ancestor
+    # actually being realized on screen.
+    page = _make_page()
+    assert page.target_machine_fingerprint_edit.isHidden() is True
+
+    page.machine_binding_combo.setCurrentIndex(2)  # "Bind to a specific machine..."
+
+    assert page.target_machine_fingerprint_edit.isHidden() is False
 
 
 # -- Exporting the file-wrapping private key --------------------------------

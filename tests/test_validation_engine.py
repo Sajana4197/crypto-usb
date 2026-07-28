@@ -12,6 +12,7 @@ from metadata.protection import MetadataProtector, generate_protection_keys
 from metadata.repository import MetadataRepository
 from usb.device_detector import USBDevice
 from validation.exceptions import ValidationFailedError
+from validation.usb_identifier import HardwareDescriptor
 from validation.validation_engine import ValidationEngine
 
 ENCRYPTED_BYTES = b"pretend-encrypted-file-content"
@@ -222,6 +223,83 @@ def test_validate_device_binding_machine_fingerprint_mismatch(controller, engine
 
     assert report.ok is False
     assert report.checks["machine_fingerprint"] is False
+
+
+def test_validate_device_binding_hardware_descriptor_mismatch(controller, engine):
+    _create_metadata(
+        controller,
+        device_binding=DeviceBinding(
+            bound=True,
+            device_id="E:\\",
+            usb_serial="ABCD:FAT32:1000",
+            vendor_id="SANDISK",
+            product_id="CRUZER_BLADE",
+            hardware_serial="4C530001A2B3C4D5",
+        ),
+    )
+
+    report = engine.validate(
+        "file-1",
+        ENCRYPTED_BYTES,
+        current_device=_device(),
+        current_usb_identifier="ABCD:FAT32:1000",
+        current_hardware_descriptor=HardwareDescriptor(
+            vendor_id="SANDISK", product_id="CRUZER_BLADE", hardware_serial="CLONED_SERIAL"
+        ),
+    )
+
+    assert report.ok is False
+    assert report.checks["hardware_descriptor"] is False
+
+
+def test_validate_device_binding_hardware_descriptor_matches(controller, engine):
+    _create_metadata(
+        controller,
+        device_binding=DeviceBinding(
+            bound=True,
+            device_id="E:\\",
+            usb_serial="ABCD:FAT32:1000",
+            vendor_id="SANDISK",
+            product_id="CRUZER_BLADE",
+            hardware_serial="4C530001A2B3C4D5",
+        ),
+    )
+
+    report = engine.validate(
+        "file-1",
+        ENCRYPTED_BYTES,
+        current_device=_device(),
+        current_usb_identifier="ABCD:FAT32:1000",
+        current_hardware_descriptor=HardwareDescriptor(
+            vendor_id="SANDISK", product_id="CRUZER_BLADE", hardware_serial="4C530001A2B3C4D5"
+        ),
+    )
+
+    assert report.ok is True
+    assert report.checks["hardware_descriptor"] is True
+
+
+def test_validate_legacy_binding_without_hardware_descriptor_ignores_current_descriptor(controller, engine):
+    """A binding with no vendor_id/product_id/hardware_serial recorded
+    (pre-Phase-2) must keep passing regardless of what descriptor the
+    caller supplies for the presented device."""
+    _create_metadata(
+        controller,
+        device_binding=DeviceBinding(bound=True, device_id="E:\\", usb_serial="ABCD:FAT32:1000"),
+    )
+
+    report = engine.validate(
+        "file-1",
+        ENCRYPTED_BYTES,
+        current_device=_device(),
+        current_usb_identifier="ABCD:FAT32:1000",
+        current_hardware_descriptor=HardwareDescriptor(
+            vendor_id="ANYTHING", product_id="ANYTHING", hardware_serial="ANYTHING"
+        ),
+    )
+
+    assert report.ok is True
+    assert "hardware_descriptor" not in report.checks
 
 
 # -- validate_or_raise / side effects -------------------------------------

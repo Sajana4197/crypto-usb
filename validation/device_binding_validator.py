@@ -12,6 +12,22 @@ Validation Engine's requirements:
   proof: a byte-for-byte image copy can preserve the serial too.
 - `machine_fingerprint` mismatch: the file requires a specific host
   machine, and the current machine's fingerprint does not match.
+
+`hardware_descriptor` (Phase 2) is a second, independent identity check
+against `vendor_id`/`product_id`/`hardware_serial` — read from the USB
+controller's own PnP descriptor rather than the filesystem, so it
+survives the kind of disk-image clone that reproduces `usb_serial`
+exactly. It is purely additive, following the same pattern as the
+existing `usb_serial is None` legacy fallback below: a record written
+before Phase 2 has all three fields `None`, and the check is skipped
+entirely rather than failed.
+
+Device binding (`bound`) and machine binding (`machine_fingerprint is not
+None`) are two independent axes (Phase 7) — a file may have either, both,
+or neither. Each is checked independently: an unbound-to-device file
+skips straight past every USB/hardware check below, but still has its
+machine fingerprint checked if one is recorded, and vice versa. Neither
+axis short-circuits the other.
 """
 
 from __future__ import annotations
@@ -22,6 +38,7 @@ from typing import Optional
 from core.logger import get_logger
 from metadata.models import DeviceBinding
 from usb.device_detector import USBDevice
+from validation.usb_identifier import HardwareDescriptor
 
 logger = get_logger(__name__)
 
@@ -49,31 +66,50 @@ class DeviceBindingValidator:
         current_device: Optional[USBDevice],
         current_usb_identifier: Optional[str],
         current_machine_fingerprint: Optional[str],
+        current_hardware_descriptor: Optional[HardwareDescriptor] = None,
     ) -> DeviceBindingResult:
         result = DeviceBindingResult()
 
-        if not device_binding.bound:
-            result.add("device_binding", True)
-            return result
+        if device_binding.bound:
+            self._check_device(result, device_binding, current_device, current_usb_identifier, current_hardware_descriptor)
 
+        if device_binding.machine_fingerprint is not None:
+            matches_machine = device_binding.machine_fingerprint == current_machine_fingerprint
+            result.add(
+                "machine_fingerprint", matches_machine, None if matches_machine else "This file is bound to a different machine"
+            )
+
+        result.add("device_binding", result.ok)
+        self._log(result)
+        return result
+
+    @staticmethod
+    def _check_device(
+        result: DeviceBindingResult,
+        device_binding: DeviceBinding,
+        current_device: Optional[USBDevice],
+        current_usb_identifier: Optional[str],
+        current_hardware_descriptor: Optional[HardwareDescriptor],
+    ) -> None:
+        """Every USB-identity check (`unauthorized_device`/`cloned_usb`/
+        `usb_identifier`/`hardware_descriptor`), run only when
+        `device_binding.bound` — entirely independent of whether a
+        machine fingerprint is also recorded, see the module docstring.
+        """
         if current_usb_identifier is None:
-            result.add("device_binding", False)
             result.add(
                 "unauthorized_device", False, "No USB device is currently presented, but this file requires one"
             )
-            self._log(result)
-            return result
+            return
 
         if device_binding.usb_serial is None:
             # Bound before a physical serial was recorded (legacy record):
             # fall back to comparing the recorded device_id only.
             matches = device_binding.device_id is None or device_binding.device_id == current_usb_identifier
             result.add("usb_identifier", matches, None if matches else "Bound device_id does not match the presented device")
-            result.add("device_binding", matches)
             if not matches:
                 result.add("unauthorized_device", False, "Presented USB device does not match the device this file is bound to")
-            self._log(result)
-            return result
+            return
 
         if device_binding.usb_serial == current_usb_identifier:
             result.add("usb_identifier", True)
@@ -93,15 +129,29 @@ class DeviceBindingValidator:
             else:
                 result.add("unauthorized_device", False, "Presented USB device does not match the device this file is bound to")
 
-        if device_binding.machine_fingerprint is not None:
-            matches_machine = device_binding.machine_fingerprint == current_machine_fingerprint
-            result.add(
-                "machine_fingerprint", matches_machine, None if matches_machine else "This file is bound to a different machine"
+        if (
+            device_binding.vendor_id is not None
+            or device_binding.product_id is not None
+            or device_binding.hardware_serial is not None
+        ):
+            matches_hardware = current_hardware_descriptor is not None and (
+                (device_binding.vendor_id is None or device_binding.vendor_id == current_hardware_descriptor.vendor_id)
+                and (
+                    device_binding.product_id is None
+                    or device_binding.product_id == current_hardware_descriptor.product_id
+                )
+                and (
+                    device_binding.hardware_serial is None
+                    or device_binding.hardware_serial == current_hardware_descriptor.hardware_serial
+                )
             )
-
-        result.add("device_binding", result.ok)
-        self._log(result)
-        return result
+            result.add(
+                "hardware_descriptor",
+                matches_hardware,
+                None
+                if matches_hardware
+                else "Presented USB device's hardware descriptor (vendor/product/serial) does not match the enrolled device",
+            )
 
     @staticmethod
     def _log(result: DeviceBindingResult) -> None:

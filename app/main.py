@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from typing import Optional
 
@@ -26,7 +27,29 @@ from ui.theme.theme_manager import ThemeManager
 from utils.paths import get_icons_dir
 
 
+def _disable_windows_ghosting() -> None:
+    """Windows silently swaps an unresponsive-looking window for a frozen,
+    unstyled ("ghost") snapshot once its message queue goes unpumped for a
+    few seconds. This application deliberately has no background-thread
+    architecture (see `ui.widgets.busy`), so writing/verifying a large
+    file against real USB hardware — two full read/write passes over the
+    file, well beyond crypto's own cost — can easily block long enough to
+    cross that threshold: the `progress_dialog` box then appears to
+    "go blank white" mid-operation, even though it renders correctly the
+    instant it's shown. Telling Windows never to ghost this process's
+    windows keeps the real, styled dialog on screen for the whole
+    operation instead.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.user32.DisableProcessWindowsGhosting()
+    except (AttributeError, OSError):
+        pass
+
+
 def create_application() -> QApplication:
+    _disable_windows_ghosting()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )

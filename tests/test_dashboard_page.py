@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from deception.content_types import DeceptionContentType
-from deception.event_repository import DeceptionEventRepository
+from deception.event_repository import DeceptionEventRepository, PresentedDeviceInfo
 from deception.triggers import DeceptionTrigger
 from metadata.controller import MetadataController
 from metadata.hashing import compute_integrity_hash
@@ -195,6 +195,30 @@ def test_activity_feed_includes_deception_event(app, deception_event_repository)
     assert page.activity_list.count() == 1
     assert "deception triggered" in page.activity_list.item(0).text().lower()
     assert "file-2" in page.activity_list.item(0).text()
+
+
+def test_activity_feed_shows_presented_device_when_recorded(app, deception_event_repository):
+    deception_event_repository.record(
+        DeceptionTrigger.DEVICE_MISMATCH,
+        DeceptionContentType.FAKE_PDF,
+        "file-2",
+        datetime.now(timezone.utc),
+        device_info=PresentedDeviceInfo(usb_serial="ABCD1234:FAT32:1000000", label="ROGUE-USB"),
+    )
+
+    page = _make_page(app, deception_event_repository=deception_event_repository)
+
+    assert "rogue-usb" in page.activity_list.item(0).text().lower()
+
+
+def test_activity_feed_omits_device_suffix_when_none_recorded(app, deception_event_repository):
+    deception_event_repository.record(
+        DeceptionTrigger.WRONG_CREDENTIALS, DeceptionContentType.FAKE_TEXT, "file-2", datetime.now(timezone.utc)
+    )
+
+    page = _make_page(app, deception_event_repository=deception_event_repository)
+
+    assert "presented device" not in page.activity_list.item(0).text().lower()
 
 
 def test_activity_feed_orders_most_recent_first(app, deception_event_repository):

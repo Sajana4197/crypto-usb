@@ -12,9 +12,43 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
 CURRENT_METADATA_VERSION = 1
+
+
+class MachineBindingMode(str, Enum):
+    """The machine-binding half of the two independent binding axes chosen
+    at encryption time (Encrypt File page) — the other half is the plain
+    `bind_device: bool` flag both `usb.secure_storage_service
+    .SecureStorageService.store_file` and this enum's sibling parameter
+    are named for. The two axes are chosen independently: a file can be
+    bound to a USB device, a machine, both, or neither.
+
+    - `NONE`: not bound to any machine.
+    - `CURRENT`: bound to whichever machine is running the encryption
+      right now (`validation.machine_fingerprint.compute_machine_fingerprint`).
+    - `SPECIFIC`: bound to a machine identified by a fingerprint obtained
+      ahead of time from that *other* machine (see the "Machine Identity"
+      section of `ui.pages.settings_page.SettingsPage`) — no live
+      connection between the two machines is ever needed, since the
+      fingerprint is a short string the user copies across by any means.
+
+    Cryptographic device-key wrapping (`crypto.key_wrapper
+    .DeviceBoundKeyWrapper`, see `usb.secure_storage_service`) applies
+    whenever `bind_device` is True and this is `NONE` — the same
+    condition the pre-Phase-7 `DEVICE_ONLY` mode used, just reached
+    through two independent inputs instead of one flat enum. It never
+    applies for `CURRENT` or `SPECIFIC`, since baking a specific
+    device's fingerprint into the key is fundamentally incompatible with
+    ever validating that key against a different, if still-authorized,
+    machine.
+    """
+
+    NONE = "none"
+    CURRENT = "current"
+    SPECIFIC = "specific"
 
 
 @dataclass
@@ -48,6 +82,17 @@ class DeviceBinding:
     `validation.device_binding_validator` — a drive letter can coincide
     across two different physical devices, but a volume serial number and
     a machine's installation GUID are far harder to collide by accident.
+
+    `vendor_id`/`product_id`/`hardware_serial` are a second, independent
+    identity signal read straight from the USB controller's own PnP
+    descriptor (`validation.usb_identifier.compute_hardware_descriptor`)
+    rather than from the filesystem — a disk-image clone reproduces
+    `usb_serial` (a filesystem-level value) exactly, but not the
+    descriptor-level identity of the physical controller it's plugged
+    into. Optional and additive: a record written before Phase 2 (or one
+    where the descriptor simply couldn't be read) has all three as
+    `None`, and `validation.device_binding_validator` treats that exactly
+    like the pre-Phase-2 `usb_serial is None` legacy case — skip, not fail.
     """
 
     device_id: Optional[str] = None
@@ -55,6 +100,9 @@ class DeviceBinding:
     bound: bool = False
     usb_serial: Optional[str] = None
     machine_fingerprint: Optional[str] = None
+    vendor_id: Optional[str] = None
+    product_id: Optional[str] = None
+    hardware_serial: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +111,9 @@ class DeviceBinding:
             "bound": self.bound,
             "usb_serial": self.usb_serial,
             "machine_fingerprint": self.machine_fingerprint,
+            "vendor_id": self.vendor_id,
+            "product_id": self.product_id,
+            "hardware_serial": self.hardware_serial,
         }
 
     @classmethod
@@ -73,6 +124,9 @@ class DeviceBinding:
             bound=data.get("bound", False),
             usb_serial=data.get("usb_serial"),
             machine_fingerprint=data.get("machine_fingerprint"),
+            vendor_id=data.get("vendor_id"),
+            product_id=data.get("product_id"),
+            hardware_serial=data.get("hardware_serial"),
         )
 
 

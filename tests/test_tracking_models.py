@@ -20,6 +20,8 @@ def _record(**overrides) -> UsageRecord:
         validation_result=True,
         screen_capture_attempts=2,
         tampering_events=1,
+        event_type="access",
+        previous_usb_id=None,
     )
     defaults.update(overrides)
     return UsageRecord(**defaults)
@@ -37,6 +39,8 @@ def test_defaults_are_empty_and_unset():
     assert record.validation_result is None
     assert record.screen_capture_attempts == 0
     assert record.tampering_events == 0
+    assert record.event_type == "access"
+    assert record.previous_usb_id is None
 
 
 def test_to_dict_serializes_every_tracked_field():
@@ -57,6 +61,8 @@ def test_to_dict_serializes_every_tracked_field():
         "validation_result",
         "screen_capture_attempts",
         "tampering_events",
+        "event_type",
+        "previous_usb_id",
     ]:
         assert field in data
 
@@ -79,3 +85,20 @@ def test_from_dict_handles_missing_optional_fields():
     assert restored.login_time is None
     assert restored.screen_capture_attempts == 0
     assert restored.tampering_events == 0
+    assert restored.event_type == "access"
+    assert restored.previous_usb_id is None
+
+
+def test_device_rebind_event_round_trips():
+    record = UsageRecord(
+        session_id="s",
+        user="alice",
+        machine_id="m",
+        file_id="f",
+        usb_id="new-usb",
+        previous_usb_id="old-usb",
+        event_type="device_rebind",
+    )
+    restored = UsageRecord.from_dict(record.to_dict())
+
+    assert restored == record

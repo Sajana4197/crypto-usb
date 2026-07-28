@@ -17,10 +17,12 @@ signal up is responsible for returning the user to account creation.
 
 from __future__ import annotations
 
+import platform
 from typing import Optional
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFormLayout,
     QLabel,
@@ -45,6 +47,7 @@ from security.password_hasher import MIN_PASSWORD_LENGTH
 from ui.dialogs.recovery_dialog import RecoveryCodeDialog
 from ui.pages.base_page import BasePage
 from ui.widgets.busy import show_result_popup
+from validation.machine_fingerprint import compute_machine_fingerprint
 
 logger = get_logger(__name__)
 
@@ -80,6 +83,7 @@ class SettingsPage(BasePage):
         form.addRow(QLabel("Theme:"), self.theme_selector)
 
         self.add_widget(form_container)
+        self.add_widget(self._build_machine_identity_section())
         self.add_widget(self._build_password_section())
         self.add_widget(self._build_danger_zone_section())
 
@@ -87,6 +91,59 @@ class SettingsPage(BasePage):
         self.theme_selector.blockSignals(True)
         self.theme_selector.setCurrentText(theme)
         self.theme_selector.blockSignals(False)
+
+    # -- Machine identity (Phase 7: pre-enrollment for "bind to a specific
+    # machine") ------------------------------------------------------------
+
+    def _build_machine_identity_section(self) -> QWidget:
+        """Displays this machine's fingerprint so it can be copied over to
+        a *different* machine's Encrypt File page and pasted into "Bind to
+        a specific machine" there — no live connection between the two
+        machines is ever needed, since `compute_machine_fingerprint` is a
+        pure local read (see that function's docstring) and this is just
+        a short string the user carries across by any means (typed,
+        copy-pasted via a file, even written down).
+        """
+        section = QWidget()
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 18, 0, 0)
+
+        heading = QLabel("Machine Identity")
+        heading.setStyleSheet("font-weight: 600; font-size: 12pt;")
+        layout.addWidget(heading)
+
+        note = QLabel(
+            "To bind a file (encrypted on a different machine) to this one, copy "
+            "this fingerprint and paste it into that machine's \"Bind to a "
+            "specific machine\" field on the Encrypt File page."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("dropHint")
+        layout.addWidget(note)
+
+        form_container = QWidget()
+        form = QFormLayout(form_container)
+        form.setContentsMargins(0, 8, 0, 0)
+
+        form.addRow(QLabel("This machine:"), QLabel(platform.node() or "unknown"))
+
+        self.machine_fingerprint_edit = QLineEdit(compute_machine_fingerprint())
+        self.machine_fingerprint_edit.setReadOnly(True)
+        self.machine_fingerprint_edit.setMinimumWidth(360)
+        form.addRow(QLabel("Fingerprint:"), self.machine_fingerprint_edit)
+
+        layout.addWidget(form_container)
+
+        self.copy_fingerprint_button = QPushButton("Copy Fingerprint")
+        self.copy_fingerprint_button.setMaximumWidth(200)
+        self.copy_fingerprint_button.clicked.connect(self._on_copy_fingerprint_clicked)
+        layout.addWidget(self.copy_fingerprint_button)
+
+        return section
+
+    def _on_copy_fingerprint_clicked(self) -> None:
+        QApplication.clipboard().setText(self.machine_fingerprint_edit.text())
+        show_result_popup(self, "Machine fingerprint copied to clipboard.")
 
     # -- Change password ------------------------------------------------------
 

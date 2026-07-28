@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from deception.content_types import DeceptionContentType
-from deception.event_repository import DeceptionEventRepository
+from deception.event_repository import DeceptionEventRepository, PresentedDeviceInfo
 from deception.triggers import DeceptionTrigger
 
 
@@ -91,3 +91,92 @@ def test_clear_removes_every_event(repository):
 
 def test_clear_on_empty_repository_returns_zero(repository):
     assert repository.clear() == 0
+
+
+# -- Presented device info (Phase 5) -----------------------------------------
+
+
+def test_record_and_list_round_trip_with_device_info(repository):
+    info = PresentedDeviceInfo(
+        usb_serial="ABCD1234:FAT32:1000000",
+        vendor_id="SANDISK",
+        product_id="CRUZER_BLADE",
+        hardware_serial="4C530001A2B3C4D5",
+        mount_point="E:\\",
+        label="MYUSB",
+    )
+    repository.record(
+        DeceptionTrigger.DEVICE_MISMATCH,
+        DeceptionContentType.FAKE_IMAGE,
+        "file-1",
+        datetime.now(timezone.utc),
+        device_info=info,
+    )
+
+    events = repository.list_events()
+
+    assert len(events) == 1
+    assert events[0].device_info == info
+
+
+def test_record_without_device_info_defaults_to_empty():
+    conn = sqlite3.connect(":memory:")
+    repo = DeceptionEventRepository(conn)
+    repo.record(DeceptionTrigger.WRONG_CREDENTIALS, DeceptionContentType.FAKE_TEXT, "file-1", datetime.now(timezone.utc))
+
+    events = repo.list_events()
+
+    assert events[0].device_info == PresentedDeviceInfo()
+    assert events[0].device_info.is_empty is True
+
+
+def test_presented_device_info_is_empty_detects_any_field_set():
+    assert PresentedDeviceInfo().is_empty is True
+    assert PresentedDeviceInfo(usb_serial="ABCD").is_empty is False
+    assert PresentedDeviceInfo(label="MYUSB").is_empty is False
+
+
+def test_schema_migration_adds_device_columns_to_a_pre_phase_5_table():
+    """Simulates a database created before Phase 5 (only the original five
+    columns exist) -- opening it with the current `DeceptionEventRepository`
+    must add the missing columns instead of failing, and any row already
+    there must still read back fine, with every new field `None`."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE deception_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            file_id TEXT,
+            generated_at TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO deception_events (trigger, content_type, file_id, generated_at, recorded_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (DeceptionTrigger.WRONG_CREDENTIALS.value, DeceptionContentType.FAKE_TEXT.value, "legacy-file", now.isoformat(), now.isoformat()),
+    )
+    conn.commit()
+
+    repo = DeceptionEventRepository(conn)  # must not raise
+
+    events = repo.list_events()
+    assert len(events) == 1
+    assert events[0].file_id == "legacy-file"
+    assert events[0].device_info == PresentedDeviceInfo()
+
+    # New writes on the migrated table work exactly as on a fresh one.
+    repo.record(
+        DeceptionTrigger.DEVICE_MISMATCH,
+        DeceptionContentType.CORRUPTED_DATA,
+        "new-file",
+        now,
+        device_info=PresentedDeviceInfo(usb_serial="NEW-SERIAL"),
+    )
+    events = repo.list_events()
+    assert len(events) == 2
+    assert events[0].device_info.usb_serial == "NEW-SERIAL"

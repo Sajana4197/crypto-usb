@@ -72,6 +72,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -92,7 +93,7 @@ from core.logger import get_logger
 from crypto import rsa_keypair
 from crypto.exceptions import CryptoError
 from crypto.key_wrapper import RSAOAEPKeyWrapper
-from metadata.models import UsagePolicy
+from metadata.models import MachineBindingMode, UsagePolicy
 from metadata.protection import MetadataProtectionKeys, derive_protection_keys_from_key_material
 from metadata.repository import MetadataRepository
 from security.auth_session import SessionManager
@@ -110,6 +111,17 @@ _FAIL_COLOR = QColor("#e5484d")
 
 _DEVICE_COLUMN_TITLES = ("Mount", "Label", "Filesystem", "Free Space", "Total Size", "Removable")
 _CONTAINER_GLOB = "*.cusc"
+
+# (display label, mode) -- shown in the machine-binding dropdown in the
+# order listed. "Bind to this machine" is first/default so the
+# out-of-the-box combination (device checkbox on + this default) matches
+# this app's original hardcoded DEVICE_AND_MACHINE behavior for anyone
+# who doesn't touch either control.
+_MACHINE_BINDING_OPTIONS = (
+    ("Bind to this machine", MachineBindingMode.CURRENT),
+    ("No machine binding", MachineBindingMode.NONE),
+    ("Bind to a specific machine...", MachineBindingMode.SPECIFIC),
+)
 
 # How often the device table polls for plugged-in/removed devices without
 # any user action. Frequent enough to feel "automatic" during a demo,
@@ -228,6 +240,8 @@ class EncryptionPage(BasePage):
         )
         layout.addWidget(self.one_time_access_checkbox)
 
+        layout.addWidget(self._build_binding_panel())
+
         self.write_button = QPushButton("Write Secure Container")
         self.write_button.setObjectName("primaryButton")
         self.write_button.setEnabled(False)
@@ -243,6 +257,57 @@ class EncryptionPage(BasePage):
         )
         self.export_key_button.clicked.connect(self._on_export_key_clicked)
         layout.addWidget(self.export_key_button)
+
+        return panel
+
+    def _build_binding_panel(self) -> QWidget:
+        """Visually set apart from the rest of the write panel — these
+        two controls decide whether this file can ever be opened
+        anywhere but this exact USB device/machine, which is easy to
+        miss as "just another checkbox" among one-time-access and the
+        write button otherwise."""
+        panel = QFrame()
+        panel.setObjectName("bindingPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 10, 12, 10)
+
+        heading = QLabel("Device & Machine Binding")
+        heading.setObjectName("bindingHeading")
+        layout.addWidget(heading)
+
+        self.bind_device_checkbox = QCheckBox("Bind to this USB device")
+        self.bind_device_checkbox.setChecked(True)
+        self.bind_device_checkbox.setToolTip(
+            "When checked, this file can only ever be opened from this exact "
+            "USB device. Combined with \"No machine binding\" below, this is "
+            "also cryptographically enforced (the wrong device derives the "
+            "wrong key, not just a failed check)."
+        )
+        layout.addWidget(self.bind_device_checkbox)
+
+        binding_row = QHBoxLayout()
+        binding_row.addWidget(QLabel("Machine binding:"))
+        self.machine_binding_combo = QComboBox()
+        for label, _mode in _MACHINE_BINDING_OPTIONS:
+            self.machine_binding_combo.addItem(label)
+        self.machine_binding_combo.setToolTip(
+            "Independently of USB device binding above: bind to no machine, "
+            "to this machine, or to a specific other machine (paste its "
+            "fingerprint, copied from that machine's Settings page). Leaving "
+            "both this and the device checkbox at \"no binding\" is required "
+            "to open the file on a different machine later using only the "
+            "exported private key and passphrase."
+        )
+        self.machine_binding_combo.currentIndexChanged.connect(self._on_machine_binding_changed)
+        binding_row.addWidget(self.machine_binding_combo, 1)
+        layout.addLayout(binding_row)
+
+        self.target_machine_fingerprint_edit = QLineEdit()
+        self.target_machine_fingerprint_edit.setPlaceholderText(
+            "Paste the target machine's fingerprint (copy it from that machine's Settings page)"
+        )
+        self.target_machine_fingerprint_edit.setVisible(False)
+        layout.addWidget(self.target_machine_fingerprint_edit)
 
         return panel
 
@@ -388,6 +453,14 @@ class EncryptionPage(BasePage):
             self._selected_device is not None and self._source_path is not None
         )
 
+    def _selected_machine_binding(self) -> MachineBindingMode:
+        return _MACHINE_BINDING_OPTIONS[self.machine_binding_combo.currentIndex()][1]
+
+    def _on_machine_binding_changed(self, _index: int) -> None:
+        self.target_machine_fingerprint_edit.setVisible(
+            self._selected_machine_binding() is MachineBindingMode.SPECIFIC
+        )
+
     def _get_key_wrapper(self) -> RSAOAEPKeyWrapper:
         if self._key_wrapper is None:
             self._show_status("Generating session key pair (RSA-4096)...")
@@ -499,6 +572,16 @@ class EncryptionPage(BasePage):
         actually selected is safe no matter what `self._selected_device`
         becomes in the meantime.
         """
+        bind_device = self.bind_device_checkbox.isChecked()
+        machine_binding = self._selected_machine_binding()
+        target_machine_fingerprint = self.target_machine_fingerprint_edit.text().strip() or None
+        if machine_binding is MachineBindingMode.SPECIFIC and not target_machine_fingerprint:
+            self._show_status(
+                "Enter the target machine's fingerprint, or choose a different machine-binding option.",
+                ok=False,
+            )
+            return
+
         key_wrapper = self._get_key_wrapper()
         portable_metadata_keys, portable_metadata_salt = self._derive_portable_metadata_keys(key_wrapper)
 
@@ -512,7 +595,9 @@ class EncryptionPage(BasePage):
                     overwrite=overwrite,
                     protection_keys=self._protection_keys,
                     metadata_repository=self._metadata_repository,
-                    bind_to_device=True,
+                    bind_device=bind_device,
+                    machine_binding=machine_binding,
+                    target_machine_fingerprint=target_machine_fingerprint,
                     usage_policy=UsagePolicy(one_time_access=self.one_time_access_checkbox.isChecked()),
                     portable_metadata_keys=portable_metadata_keys,
                     portable_metadata_salt=portable_metadata_salt,
@@ -544,15 +629,25 @@ class EncryptionPage(BasePage):
             self._refresh_containers()
         else:
             self._reselect_device(device.device_id)
-        self._deep_verify(result, key_wrapper)
+        self._deep_verify(result, key_wrapper, device, bind_device, machine_binding)
 
-    def _deep_verify(self, result: SecureWriteResult, key_wrapper: RSAOAEPKeyWrapper) -> None:
+    def _deep_verify(
+        self,
+        result: SecureWriteResult,
+        key_wrapper: RSAOAEPKeyWrapper,
+        device: USBDevice,
+        bind_device: bool,
+        machine_binding: MachineBindingMode,
+    ) -> None:
         try:
             with progress_dialog(self, "Verifying secure container..."):
                 self._service.verify_stored_file(
                     container_path=result.destination,
                     key_wrapper=key_wrapper,
                     protection_keys=result.protection_keys,
+                    device=device,
+                    bind_device=bind_device,
+                    machine_binding=machine_binding,
                 )
         except USBError as exc:
             logger.error("Deep verification failed for %s: %s", result.destination, exc)

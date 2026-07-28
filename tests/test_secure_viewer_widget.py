@@ -13,9 +13,15 @@ from crypto.secure_bytes import SecureBytes
 from deception.content_generators import generate_fake_image, generate_fake_pdf
 from viewer.interfaces import SecureViewSession
 from viewer.screen_capture_protection import CaptureProtectionLevel
-from viewer.secure_viewer_widget import CONTENT_TYPE_PDF, CONTENT_TYPE_TXT, SecureViewerWidget
+from viewer.secure_viewer_widget import CONTENT_TYPE_MP4, CONTENT_TYPE_PDF, CONTENT_TYPE_TXT, SecureViewerWidget
 
 TEXT_CONTENT = b"the quarterly figures are strictly confidential"
+
+# A minimal, realistic ISO-BMFF header -- enough for `_sniff_content_type`
+# and `QMediaPlayer.setSourceDevice` to recognize the container; it has no
+# real frame data, so tests below only assert on this widget's own
+# wiring (buffer/stack/controls), never on successful decode or playback.
+MP4_CONTENT = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41" + b"\x00" * 64
 
 
 def _large_png_bytes(width: int, height: int) -> bytes:
@@ -77,6 +83,90 @@ def test_displays_pdf(widget, app):
 
     assert widget._pdf_document.pageCount() == 1
     assert widget._stack.currentWidget() is widget._pdf_view
+
+
+def test_displays_video(widget, app):
+    widget.display(MP4_CONTENT, CONTENT_TYPE_MP4)
+    app.processEvents()
+
+    assert widget._stack.currentWidget() is widget._video_view
+    assert widget._video_buffer is not None
+
+
+def test_video_display_hides_zoom_toolbar_and_shows_video_controls(widget, app):
+    widget.show()
+    widget.display(MP4_CONTENT, CONTENT_TYPE_MP4)
+    app.processEvents()
+
+    assert widget._video_controls_widget.isVisible() is True
+    assert widget._zoom_toolbar_widget.isVisible() is False
+
+
+def test_non_video_display_shows_zoom_toolbar_and_hides_video_controls(widget, app):
+    widget.show()
+    widget.display(TEXT_CONTENT, CONTENT_TYPE_TXT)
+    app.processEvents()
+
+    assert widget._zoom_toolbar_widget.isVisible() is True
+    assert widget._video_controls_widget.isVisible() is False
+
+
+def test_switching_away_from_video_stops_playback_and_releases_the_buffer(widget, app):
+    widget.display(MP4_CONTENT, CONTENT_TYPE_MP4)
+    app.processEvents()
+    assert widget._video_buffer is not None
+
+    widget.display(TEXT_CONTENT, CONTENT_TYPE_TXT)
+
+    assert widget._video_buffer is None
+
+
+def test_toggle_video_playback_pauses_when_currently_playing(widget, monkeypatch):
+    from PySide6.QtMultimedia import QMediaPlayer
+
+    calls = []
+    monkeypatch.setattr(widget._media_player, "playbackState", lambda: QMediaPlayer.PlaybackState.PlayingState)
+    monkeypatch.setattr(widget._media_player, "pause", lambda: calls.append("pause"))
+
+    widget._toggle_video_playback()
+
+    assert calls == ["pause"]
+
+
+def test_toggle_video_playback_plays_when_currently_paused(widget, monkeypatch):
+    from PySide6.QtMultimedia import QMediaPlayer
+
+    calls = []
+    monkeypatch.setattr(widget._media_player, "playbackState", lambda: QMediaPlayer.PlaybackState.PausedState)
+    monkeypatch.setattr(widget._media_player, "play", lambda: calls.append("play"))
+
+    widget._toggle_video_playback()
+
+    assert calls == ["play"]
+
+
+def test_play_pause_button_label_follows_playback_state(widget):
+    from PySide6.QtMultimedia import QMediaPlayer
+
+    widget._on_video_playback_state_changed(QMediaPlayer.PlaybackState.PlayingState)
+    assert widget.play_pause_button.text() == "Pause"
+
+    widget._on_video_playback_state_changed(QMediaPlayer.PlaybackState.PausedState)
+    assert widget.play_pause_button.text() == "Play"
+
+
+def test_video_duration_changed_updates_slider_range(widget):
+    widget._on_video_duration_changed(120_000)
+
+    assert widget._video_position_slider.maximum() == 120_000
+
+
+def test_video_position_changed_updates_slider_value(widget):
+    widget._on_video_duration_changed(120_000)
+
+    widget._on_video_position_changed(45_000)
+
+    assert widget._video_position_slider.value() == 45_000
 
 
 def test_pdf_view_uses_multi_page_mode_so_all_pages_are_reachable(widget):
@@ -277,7 +367,7 @@ def test_display_after_close_raises(widget):
 
 
 @pytest.mark.parametrize(
-    "attr", ["_text_view", "_label_view", "_pdf_view"]
+    "attr", ["_text_view", "_label_view", "_pdf_view", "_video_view"]
 )
 def test_context_menu_is_disabled_on_every_sub_view(widget, attr):
     sub_widget = getattr(widget, attr)
@@ -288,7 +378,7 @@ def test_widget_itself_disables_context_menu(widget):
     assert widget.contextMenuPolicy() == Qt.ContextMenuPolicy.NoContextMenu
 
 
-@pytest.mark.parametrize("attr", ["_text_view", "_label_view", "_pdf_view"])
+@pytest.mark.parametrize("attr", ["_text_view", "_label_view", "_pdf_view", "_video_view"])
 def test_drag_and_drop_is_disabled_on_every_sub_view(widget, attr):
     sub_widget = getattr(widget, attr)
     assert sub_widget.acceptDrops() is False
@@ -449,6 +539,16 @@ def test_close_clears_pdf_document(widget, app):
     assert widget._pdf_document.pageCount() == 0
 
 
+def test_close_stops_video_and_releases_the_buffer(widget, app):
+    widget.display(MP4_CONTENT, CONTENT_TYPE_MP4)
+    app.processEvents()
+    assert widget._video_buffer is not None
+
+    widget.close()
+
+    assert widget._video_buffer is None
+
+
 def test_close_is_idempotent(widget):
     widget.display(TEXT_CONTENT, CONTENT_TYPE_TXT)
 
@@ -581,6 +681,16 @@ def test_printscreen_detected_blanks_pdf_content(widget, app):
     widget._on_printscreen_detected()
 
     assert widget._pdf_document.pageCount() == 0
+
+
+def test_printscreen_detected_stops_video_and_releases_the_buffer(widget, app):
+    widget.display(MP4_CONTENT, CONTENT_TYPE_MP4)
+    app.processEvents()
+    assert widget._video_buffer is not None
+
+    widget._on_printscreen_detected()
+
+    assert widget._video_buffer is None
 
 
 def test_printscreen_detected_closes_the_viewer(widget):

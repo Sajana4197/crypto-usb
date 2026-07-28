@@ -3,7 +3,7 @@
 import pytest
 
 from crypto.exceptions import KeyDestroyedError
-from crypto.key_manager import KeyManager, KeyState, ManagedKey
+from crypto.key_manager import KeyManager, KeyState, ManagedKey, derive_device_binding_key
 from crypto.key_wrapper import RSAOAEPKeyWrapper
 
 
@@ -65,3 +65,29 @@ def test_unwrap_key_returns_new_managed_key(manager, rsa_keypair_fixture):
     unwrapped_fek = manager.unwrap_key(wrapped, wrapper)
 
     assert unwrapped_fek is not fek
+
+
+# -- derive_device_binding_key (Phase 3: cryptographic device binding) -----
+
+
+def test_derive_device_binding_key_is_deterministic():
+    a = derive_device_binding_key(b"same-fingerprint")
+    b = derive_device_binding_key(b"same-fingerprint")
+    assert a == b
+
+
+def test_derive_device_binding_key_differs_for_different_fingerprints():
+    a = derive_device_binding_key(b"fingerprint-a")
+    b = derive_device_binding_key(b"fingerprint-b")
+    assert a != b
+
+
+def test_derive_device_binding_key_is_32_bytes():
+    key = derive_device_binding_key(b"any-fingerprint")
+    assert len(key) == 32
+
+
+def test_derive_device_binding_key_never_holds_the_raw_fingerprint():
+    fingerprint = b"UNMISTAKABLE-FINGERPRINT-MARKER-998877"
+    key = derive_device_binding_key(fingerprint)
+    assert fingerprint not in key

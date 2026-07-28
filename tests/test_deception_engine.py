@@ -9,7 +9,7 @@ import pytest
 
 from deception.content_types import DeceptionContentType
 from deception.deception_engine import DeceptionEngine, DeceptionResponse
-from deception.event_repository import DeceptionEventRepository
+from deception.event_repository import DeceptionEventRepository, PresentedDeviceInfo
 from deception.triggers import DeceptionTrigger
 
 FORBIDDEN_PHRASES = ["access denied", "authentication failed", "unauthorized access"]
@@ -166,3 +166,33 @@ def test_multiple_activations_are_all_recorded_most_recent_first(event_repositor
     assert len(events) == 2
     assert events[0].file_id == "file-2"  # most recent first
     assert events[1].file_id == "file-1"
+
+
+# -- Presented device info (Phase 5) -----------------------------------------
+
+
+def test_activate_forwards_device_info_to_the_repository(event_repository):
+    engine = DeceptionEngine(rng=random.Random(1), event_repository=event_repository)
+    info = PresentedDeviceInfo(usb_serial="ABCD1234:FAT32:1000000", vendor_id="SANDISK", label="MYUSB")
+
+    engine.activate(DeceptionTrigger.DEVICE_MISMATCH, file_id="file-9", device_info=info)
+
+    events = event_repository.list_events()
+    assert events[0].device_info == info
+
+
+def test_activate_without_device_info_records_an_empty_one(event_repository):
+    engine = DeceptionEngine(rng=random.Random(1), event_repository=event_repository)
+
+    engine.activate(DeceptionTrigger.WRONG_CREDENTIALS, file_id="file-1")
+
+    events = event_repository.list_events()
+    assert events[0].device_info == PresentedDeviceInfo()
+
+
+def test_activate_with_device_info_but_no_repository_does_not_raise():
+    engine = DeceptionEngine(rng=random.Random(1))
+    response = engine.activate(
+        DeceptionTrigger.DEVICE_MISMATCH, device_info=PresentedDeviceInfo(usb_serial="ABCD")
+    )
+    assert isinstance(response, DeceptionResponse)

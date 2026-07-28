@@ -9,14 +9,20 @@ import pytest
 from crypto.file_encryptor import FileEncryptor
 from crypto.key_wrapper import RSAOAEPKeyWrapper
 from crypto.secure_cleanup import CleanupReason
+from deception.deception_engine import DeceptionEngine
+from deception.event_repository import DeceptionEventRepository, PresentedDeviceInfo
 from deception.triggers import DeceptionTrigger
 from metadata.controller import MetadataController
 from metadata.hashing import compute_integrity_hash
 from metadata.models import DeviceBinding, ExpiryRules, UsagePolicy
 from metadata.protection import MetadataProtector, generate_protection_keys
 from metadata.repository import MetadataRepository
+from security.device_mismatch_throttle import DeviceMismatchThrottle
+from security.lockout_policy import MAX_FAILED_ATTEMPTS
+from usb.device_detector import USBDevice
 from usb.secure_access_service import SecureAccessService, _map_validation_failure_to_trigger
-from validation.validation_engine import ValidationReport
+from validation.usb_identifier import HardwareDescriptor
+from validation.validation_engine import ValidationEngine, ValidationReport
 
 PLAINTEXT = b"the confidential document content"
 FORBIDDEN_PHRASES = [b"access denied", b"authentication failed", b"unauthorized access"]
@@ -298,6 +304,377 @@ def test_unauthorized_device_triggers_device_mismatch_deception(
 
     assert outcome.granted is False
     assert outcome.deception.trigger is DeceptionTrigger.DEVICE_MISMATCH
+
+
+def test_mismatched_hardware_descriptor_triggers_device_mismatch_deception(
+    controller, container, container_bytes, service, wrapper, keys
+):
+    """A cloned drive reproducing the volume-level usb_serial exactly is
+    still caught here via the descriptor-level hardware serial (Phase 2)."""
+    _create(
+        controller,
+        container,
+        container_bytes,
+        device_binding=DeviceBinding(
+            bound=True,
+            device_id="E:\\",
+            usb_serial="ABCD:FAT32:1000",
+            vendor_id="SANDISK",
+            product_id="CRUZER_BLADE",
+            hardware_serial="4C530001A2B3C4D5",
+        ),
+    )
+
+    outcome = service.attempt_access(
+        "file-1",
+        container_bytes,
+        wrapper,
+        keys,
+        _Collector(),
+        current_usb_identifier="ABCD:FAT32:1000",
+        current_hardware_descriptor=HardwareDescriptor(
+            vendor_id="SANDISK", product_id="CRUZER_BLADE", hardware_serial="CLONED_SERIAL"
+        ),
+    )
+
+    assert outcome.granted is False
+    assert outcome.deception.trigger is DeceptionTrigger.DEVICE_MISMATCH
+
+
+# -- Cryptographic USB binding via HKDF (Phase 3) ----------------------------
+
+
+def _create_device_only_file(controller, wrapper, usb_serial: str, descriptor: HardwareDescriptor, file_id="file-1"):
+    """Unlike `_create`, builds its own container wrapped with a
+    `DeviceBoundKeyWrapper` derived from `usb_serial`/`descriptor` — the
+    shared `container`/`container_bytes` fixtures are wrapped with the
+    plain `wrapper` only, which a DEVICE_ONLY record must never be."""
+    from crypto.file_encryptor import FileEncryptor
+    from crypto.key_manager import derive_device_binding_key
+    from crypto.key_wrapper import DeviceBoundKeyWrapper
+    from metadata.hashing import compute_integrity_hash
+    from validation.usb_identifier import device_fingerprint_material
+
+    device_key = derive_device_binding_key(device_fingerprint_material(usb_serial, descriptor))
+    device_bound_wrapper = DeviceBoundKeyWrapper(wrapper, device_key)
+    container = FileEncryptor().encrypt_bytes(PLAINTEXT, device_bound_wrapper)
+    container_bytes = container.serialize()
+    integrity_hash = compute_integrity_hash(container_bytes)
+    controller.create(
+        file_id=file_id,
+        owner_id="owner-1",
+        wrapped_key=container.wrapped_key,
+        wrap_algorithm=container.wrap_algorithm,
+        integrity_hash=integrity_hash,
+        device_binding=DeviceBinding(
+            bound=True,
+            device_id="E:\\",
+            usb_serial=usb_serial,
+            vendor_id=descriptor.vendor_id,
+            product_id=descriptor.product_id,
+            hardware_serial=descriptor.hardware_serial,
+        ),
+    )
+    return container_bytes
+
+
+def test_device_only_file_with_matching_device_decrypts_successfully(controller, wrapper, service, keys):
+    usb_serial = "SERIAL-A:FAT32:1000000"
+    descriptor = HardwareDescriptor(vendor_id="SANDISK", product_id="CRUZER_BLADE", hardware_serial="AAA111")
+    container_bytes = _create_device_only_file(controller, wrapper, usb_serial, descriptor)
+    on_granted = _Collector()
+
+    outcome = service.attempt_access(
+        "file-1",
+        container_bytes,
+        wrapper,
+        keys,
+        on_granted,
+        current_usb_identifier=usb_serial,
+        current_hardware_descriptor=descriptor,
+    )
+
+    assert outcome.granted is True
+    assert on_granted.calls == [PLAINTEXT]
+
+
+def test_device_only_file_with_a_different_device_is_denied(controller, wrapper, service, keys):
+    """End-to-end: a different device is caught by
+    `validation.device_binding_validator`'s policy check before
+    `attempt_access` ever attempts to decrypt — the pure crypto-layer
+    proof (no validation involved at all) lives in
+    `tests.test_secure_storage_service`."""
+    usb_serial = "SERIAL-A:FAT32:1000000"
+    descriptor = HardwareDescriptor(vendor_id="SANDISK", product_id="CRUZER_BLADE", hardware_serial="AAA111")
+    container_bytes = _create_device_only_file(controller, wrapper, usb_serial, descriptor)
+
+    outcome = service.attempt_access(
+        "file-1",
+        container_bytes,
+        wrapper,
+        keys,
+        _Collector(),
+        current_usb_identifier="SERIAL-B:FAT32:1000000",
+        current_hardware_descriptor=HardwareDescriptor(
+            vendor_id="KINGSTON", product_id="DATATRAVELER", hardware_serial="BBB222"
+        ),
+    )
+
+    assert outcome.granted is False
+    assert outcome.deception.trigger is DeceptionTrigger.DEVICE_MISMATCH
+
+
+# -- Forensic logging of the presented device (Phase 5) ---------------------
+
+
+def test_device_mismatch_records_the_presented_devices_identity(controller, repository, wrapper, keys):
+    """The core Phase 5 proof: a DEVICE_MISMATCH deception ends up in the
+    audit trail carrying the *presented* (wrong) device's identity, not
+    just the fact that a mismatch occurred."""
+    usb_serial = "SERIAL-A:FAT32:1000000"
+    descriptor = HardwareDescriptor(vendor_id="SANDISK", product_id="CRUZER_BLADE", hardware_serial="AAA111")
+    container_bytes = _create_device_only_file(controller, wrapper, usb_serial, descriptor)
+
+    conn = sqlite3.connect(":memory:")
+    event_repository = DeceptionEventRepository(conn)
+    deception_engine = DeceptionEngine(event_repository=event_repository)
+    service = SecureAccessService(repository, deception_engine=deception_engine)
+
+    presented_device = USBDevice(
+        device_id="F:\\",
+        mount_point="F:\\",
+        label="ROGUE-USB",
+        filesystem="FAT32",
+        total_bytes=2_000_000,
+        free_bytes=1_000_000,
+        is_removable=True,
+    )
+    outcome = service.attempt_access(
+        "file-1",
+        container_bytes,
+        wrapper,
+        keys,
+        _Collector(),
+        current_device=presented_device,
+        current_usb_identifier="SERIAL-B:FAT32:2000000",
+        current_hardware_descriptor=HardwareDescriptor(
+            vendor_id="KINGSTON", product_id="DATATRAVELER", hardware_serial="BBB222"
+        ),
+    )
+    assert outcome.granted is False
+    assert outcome.deception.trigger is DeceptionTrigger.DEVICE_MISMATCH
+
+    events = event_repository.list_events()
+    assert len(events) == 1
+    assert events[0].device_info == PresentedDeviceInfo(
+        usb_serial="SERIAL-B:FAT32:2000000",
+        vendor_id="KINGSTON",
+        product_id="DATATRAVELER",
+        hardware_serial="BBB222",
+        mount_point="F:\\",
+        label="ROGUE-USB",
+    )
+    # Never the enrolled (correct) device's identity -- this is a record
+    # of what actually tried to open the file.
+    assert events[0].device_info.usb_serial != usb_serial
+
+
+def test_wrong_credentials_deception_records_no_device_when_none_presented(repository, wrapper, keys):
+    """A trigger unrelated to any device (e.g. a decoy session) still
+    writes a well-formed, empty `PresentedDeviceInfo` -- never crashes,
+    never fabricates a device that wasn't actually there."""
+    conn = sqlite3.connect(":memory:")
+    event_repository = DeceptionEventRepository(conn)
+    deception_engine = DeceptionEngine(event_repository=event_repository)
+    service = SecureAccessService(repository, deception_engine=deception_engine)
+
+    outcome = service.attempt_access(
+        "file-1", b"whatever-bytes", wrapper, keys, _Collector(), force_deception=True
+    )
+
+    assert outcome.granted is False
+    events = event_repository.list_events()
+    assert len(events) == 1
+    assert events[0].device_info == PresentedDeviceInfo()
+
+
+# -- Device-mismatch rate-limiting (Phase 4) ---------------------------------
+
+
+def _spy_on_validate(monkeypatch) -> list:
+    """Patches `ValidationEngine.validate` with a wrapper that still calls
+    through to the real implementation (so behavior is unaffected) but
+    records each call -- used to prove a throttled attempt skips
+    validation entirely, rather than merely failing it again. A plain
+    `MagicMock(wraps=...)` doesn't work here: replacing a class method
+    with a `MagicMock` instance loses Python's normal descriptor-based
+    `self` binding, so a real (non-throttled) call would crash trying to
+    use the `file_id` argument as `self`.
+    """
+    original_validate = ValidationEngine.validate
+    calls: list = []
+
+    def _spy(self, *args, **kwargs):
+        calls.append((args, kwargs))
+        return original_validate(self, *args, **kwargs)
+
+    monkeypatch.setattr(ValidationEngine, "validate", _spy)
+    return calls
+
+
+def test_repeated_device_mismatches_lock_out_further_attempts_without_revalidating(
+    controller, container, container_bytes, service, wrapper, keys, monkeypatch
+):
+    _create(
+        controller,
+        container,
+        container_bytes,
+        device_binding=DeviceBinding(bound=True, device_id="E:\\", usb_serial="ABCD:FAT32:1000"),
+    )
+
+    for _ in range(MAX_FAILED_ATTEMPTS):
+        outcome = service.attempt_access(
+            "file-1", container_bytes, wrapper, keys, _Collector(), current_usb_identifier=None
+        )
+        assert outcome.granted is False
+        assert outcome.deception.trigger is DeceptionTrigger.DEVICE_MISMATCH
+
+    # Now throttled: spy on ValidationEngine.validate to prove the next
+    # attempt is deceived WITHOUT re-running validation at all -- a real
+    # rate limit, not just another ordinary validation failure.
+    calls = _spy_on_validate(monkeypatch)
+
+    outcome = service.attempt_access(
+        "file-1", container_bytes, wrapper, keys, _Collector(), current_usb_identifier=None
+    )
+
+    assert outcome.granted is False
+    assert outcome.deception.trigger is DeceptionTrigger.DEVICE_MISMATCH
+    assert calls == []
+
+
+def test_successful_access_resets_the_device_mismatch_counter(
+    controller, container, container_bytes, service, wrapper, keys, monkeypatch
+):
+    # `machine_fingerprint` is deliberately set (DEVICE_AND_MACHINE-shaped,
+    # not DEVICE_ONLY) -- a binding with `bound=True` and no
+    # `machine_fingerprint` is Phase 3's DEVICE_ONLY signature, which would
+    # require this test's plain (non-device-bound) `container`/`wrapper`
+    # fixtures to be wrapped with a `DeviceBoundKeyWrapper` to decrypt.
+    _create(
+        controller,
+        container,
+        container_bytes,
+        device_binding=DeviceBinding(
+            bound=True,
+            device_id="E:\\",
+            label="MYUSB",
+            usb_serial="ABCD:FAT32:1000",
+            machine_fingerprint="fixed-machine-fingerprint",
+        ),
+    )
+
+    for _ in range(MAX_FAILED_ATTEMPTS - 1):
+        outcome = service.attempt_access(
+            "file-1", container_bytes, wrapper, keys, _Collector(), current_usb_identifier=None
+        )
+        assert outcome.granted is False
+
+    matching_device = USBDevice(
+        device_id="E:\\",
+        mount_point="E:\\",
+        label="MYUSB",
+        filesystem="FAT32",
+        total_bytes=1_000_000,
+        free_bytes=500_000,
+        is_removable=True,
+    )
+    outcome = service.attempt_access(
+        "file-1",
+        container_bytes,
+        wrapper,
+        keys,
+        _Collector(),
+        current_device=matching_device,
+        current_usb_identifier="ABCD:FAT32:1000",
+        current_machine_fingerprint="fixed-machine-fingerprint",
+    )
+    assert outcome.granted is True
+
+    # One more mismatch alone must NOT be throttled -- proving the
+    # near-threshold count from before the successful access was reset,
+    # not merely paused. Spying on ValidationEngine.validate confirms
+    # this denial came from a genuine re-validation, not a short-circuit.
+    calls = _spy_on_validate(monkeypatch)
+
+    outcome = service.attempt_access(
+        "file-1", container_bytes, wrapper, keys, _Collector(), current_usb_identifier=None
+    )
+
+    assert outcome.granted is False
+    assert outcome.deception.trigger is DeceptionTrigger.DEVICE_MISMATCH
+    assert len(calls) == 1
+
+
+def test_device_mismatch_lockout_never_affects_a_different_file_id(
+    controller, container, container_bytes, service, wrapper, keys, monkeypatch
+):
+    _create(
+        controller,
+        container,
+        container_bytes,
+        file_id="file-locked",
+        device_binding=DeviceBinding(bound=True, device_id="E:\\", usb_serial="ABCD:FAT32:1000"),
+    )
+    _create(
+        controller,
+        container,
+        container_bytes,
+        file_id="file-other",
+        device_binding=DeviceBinding(bound=True, device_id="E:\\", usb_serial="WXYZ:FAT32:2000"),
+    )
+
+    for _ in range(MAX_FAILED_ATTEMPTS):
+        service.attempt_access(
+            "file-locked", container_bytes, wrapper, keys, _Collector(), current_usb_identifier=None
+        )
+
+    # "file-locked" is now throttled -- an unrelated file_id must still
+    # run real validation, proven the same way: ValidationEngine.validate
+    # is actually invoked for it.
+    calls = _spy_on_validate(monkeypatch)
+
+    outcome = service.attempt_access(
+        "file-other", container_bytes, wrapper, keys, _Collector(), current_usb_identifier=None
+    )
+
+    assert outcome.granted is False
+    assert outcome.deception.trigger is DeceptionTrigger.DEVICE_MISMATCH
+    assert len(calls) == 1
+
+
+def test_device_mismatch_throttle_instance_is_reused_across_service_calls_when_supplied(
+    controller, container, container_bytes, repository, wrapper, keys
+):
+    """Confirms the constructor wiring: an explicitly supplied throttle
+    accumulates state across separate `SecureAccessService` instances,
+    exactly like `ui.pages.decryption_page.DecryptionPage` relies on
+    (a fresh service per view attempt, one shared throttle)."""
+    _create(
+        controller,
+        container,
+        container_bytes,
+        device_binding=DeviceBinding(bound=True, device_id="E:\\", usb_serial="ABCD:FAT32:1000"),
+    )
+    throttle = DeviceMismatchThrottle()
+
+    for _ in range(MAX_FAILED_ATTEMPTS):
+        fresh_service = SecureAccessService(repository, device_mismatch_throttle=throttle)
+        fresh_service.attempt_access(
+            "file-1", container_bytes, wrapper, keys, _Collector(), current_usb_identifier=None
+        )
+
+    assert throttle.is_locked("file-1") is True
 
 
 def test_missing_metadata_triggers_metadata_tampering_deception(service, wrapper, keys):

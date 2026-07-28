@@ -13,11 +13,13 @@ carries the trigger for the audit log only — the generated `content`
 itself never mentions credentials, devices, tampering, or expiry.
 
 When an `event_repository` is supplied, every activation is also
-recorded there (trigger, content type, file_id, timestamp — never the
-fabricated `content` itself) so `ui.pages.deception_page.DeceptionPage`
-has something queryable to show. This is purely an audit trail of
-decisions already made — nothing here reads the repository back to
-decide what to do, so it cannot change this engine's behavior.
+recorded there (trigger, content type, file_id, timestamp, and — Phase
+5 — whatever device was presented at the time, see
+`deception.event_repository.PresentedDeviceInfo` — never the fabricated
+`content` itself) so `ui.pages.deception_page.DeceptionPage` has
+something queryable to show. This is purely an audit trail of decisions
+already made — nothing here reads the repository back to decide what to
+do, so it cannot change this engine's behavior.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ from deception.content_types import MIME_TYPES, DeceptionContentType
 from deception.triggers import DeceptionTrigger
 
 if TYPE_CHECKING:
-    from deception.event_repository import DeceptionEventRepository
+    from deception.event_repository import DeceptionEventRepository, PresentedDeviceInfo
 
 logger = get_logger(__name__)
 
@@ -97,12 +99,18 @@ class DeceptionEngine:
         trigger: DeceptionTrigger,
         file_id: Optional[str] = None,
         content_type: Optional[DeceptionContentType] = None,
+        device_info: Optional["PresentedDeviceInfo"] = None,
     ) -> DeceptionResponse:
         """Generate and log a deceptive response for `trigger`.
 
         `content_type` forces a specific kind of fake content; if
         omitted, one is chosen at random so behavior is not predictable
         from the outside.
+
+        `device_info` (Phase 5) is the identity of whatever USB device
+        was actually presented for this attempt — purely a forensic
+        audit detail forwarded to `event_repository.record`, never used
+        to decide any part of this response.
         """
         chosen_type = content_type or self._rng.choice(list(DeceptionContentType))
         content = _GENERATORS[chosen_type](self._rng, file_id)
@@ -118,7 +126,7 @@ class DeceptionEngine:
 
         self._log_event(trigger, chosen_type, file_id)
         if self._event_repository is not None:
-            self._event_repository.record(trigger, chosen_type, file_id, response.generated_at)
+            self._event_repository.record(trigger, chosen_type, file_id, response.generated_at, device_info)
         return response
 
     def _filename_for(self, content_type: DeceptionContentType) -> str:

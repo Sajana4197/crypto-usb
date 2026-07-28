@@ -13,8 +13,8 @@ Composes, without duplicating:
   ("File Integrity").
 - `validation.device_binding_validator.DeviceBindingValidator` for
   device/machine binding ("Device Binding", "Machine Fingerprint",
-  "USB Identifier"; and the "Cloned USB" / "Unauthorized devices"
-  rejection reasons).
+  "USB Identifier", "Hardware Descriptor"; and the "Cloned USB" /
+  "Unauthorized devices" rejection reasons).
 - Expiry / access-count / one-time-access checks that mirror
   `MetadataController.enforce_policy`, but read-only — this engine
   never mutates `access_count` or `last_accessed_at`. Once access is
@@ -43,6 +43,7 @@ from metadata.repository import MetadataRepository
 from usb.device_detector import USBDevice
 from validation.device_binding_validator import DeviceBindingValidator
 from validation.exceptions import ValidationFailedError
+from validation.usb_identifier import HardwareDescriptor
 
 logger = get_logger(__name__)
 
@@ -86,6 +87,7 @@ class ValidationEngine:
         current_device: Optional[USBDevice] = None,
         current_usb_identifier: Optional[str] = None,
         current_machine_fingerprint: Optional[str] = None,
+        current_hardware_descriptor: Optional[HardwareDescriptor] = None,
     ) -> ValidationReport:
         """Run every check for `file_id` and return a `ValidationReport`.
 
@@ -129,7 +131,11 @@ class ValidationEngine:
         self._validate_policy(report, metadata)
 
         binding_result = self._device_binding_validator.validate(
-            metadata.device_binding, current_device, current_usb_identifier, current_machine_fingerprint
+            metadata.device_binding,
+            current_device,
+            current_usb_identifier,
+            current_machine_fingerprint,
+            current_hardware_descriptor,
         )
         for name, passed in binding_result.checks.items():
             report.add(name, passed)
@@ -151,10 +157,16 @@ class ValidationEngine:
         current_device: Optional[USBDevice] = None,
         current_usb_identifier: Optional[str] = None,
         current_machine_fingerprint: Optional[str] = None,
+        current_hardware_descriptor: Optional[HardwareDescriptor] = None,
     ) -> ValidationReport:
         """Like `validate`, but raises `ValidationFailedError` if any check failed."""
         report = self.validate(
-            file_id, encrypted_file_bytes, current_device, current_usb_identifier, current_machine_fingerprint
+            file_id,
+            encrypted_file_bytes,
+            current_device,
+            current_usb_identifier,
+            current_machine_fingerprint,
+            current_hardware_descriptor,
         )
         if not report.ok:
             raise ValidationFailedError(report)

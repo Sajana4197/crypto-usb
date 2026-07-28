@@ -4,8 +4,9 @@ Reads from `deception.event_repository.DeceptionEventRepository`, which
 `deception.deception_engine.DeceptionEngine` writes to on every
 `activate()` call (see that module's docstring). This page never shows
 the fabricated content itself — only the audit metadata (trigger,
-content type, file_id, timestamp) — matching the repository's own
-storage contract.
+content type, file_id, timestamp, and — Phase 5 — whatever USB device
+was actually presented) — matching the repository's own storage
+contract.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.logger import get_logger
-from deception.event_repository import DeceptionEventRecord, DeceptionEventRepository
+from deception.event_repository import DeceptionEventRecord, DeceptionEventRepository, PresentedDeviceInfo
 from ui.pages.base_page import BasePage
 from utils.formatting import format_datetime
 
@@ -35,7 +36,30 @@ logger = get_logger(__name__)
 # every page feels equally "live".
 _REFRESH_INTERVAL_MS = 2000
 
-_COLUMN_TITLES = ("Trigger", "Content Type", "File ID", "Generated At")
+_COLUMN_TITLES = ("Trigger", "Content Type", "File ID", "Generated At", "Presented Device")
+
+
+def _format_device_info(info: PresentedDeviceInfo) -> str:
+    """A compact, human-readable summary of whatever device was
+    presented (Phase 5) — "—" when nothing was recorded at all (a
+    pre-Phase-5 event, or a trigger with no device involved, e.g. a
+    wrong password)."""
+    if info.is_empty:
+        return "—"
+
+    location = info.label or info.mount_point
+    hardware = " ".join(part for part in (info.vendor_id, info.product_id) if part)
+
+    pieces = []
+    if location:
+        pieces.append(location)
+    if hardware:
+        pieces.append(hardware)
+    if info.hardware_serial:
+        pieces.append(f"#{info.hardware_serial}")
+    if not pieces and info.usb_serial:
+        pieces.append(info.usb_serial)
+    return " · ".join(pieces) if pieces else "—"
 
 
 class DeceptionPage(BasePage):
@@ -127,6 +151,7 @@ class DeceptionPage(BasePage):
             QTableWidgetItem(event.content_type.value),
             QTableWidgetItem(event.file_id or "—"),
             QTableWidgetItem(format_datetime(event.generated_at)),
+            QTableWidgetItem(_format_device_info(event.device_info)),
         )
         for column, cell in enumerate(values):
             self.table.setItem(row, column, cell)

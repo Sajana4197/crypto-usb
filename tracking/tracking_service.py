@@ -103,6 +103,55 @@ class UsageTracker:
         )
         return record
 
+    def record_device_rebind(
+        self,
+        user: str,
+        machine_id: str,
+        file_id: str,
+        previous_usb_id: Optional[str],
+        new_usb_id: Optional[str],
+    ) -> UsageRecord:
+        """Record an explicit "Rebind to this device" action (Phase 6) as
+        its own entry in this same tamper-evident log — reusing the exact
+        hash chain and encrypt-then-MAC protection every session record
+        already gets, rather than a separate audit trail. Unlike a
+        session, a rebind has no separate open/close phase: it is one
+        instantaneous administrative action, sealed and appended
+        immediately with `login_time == close_time`.
+
+        Callers must only call this *after* `metadata.device_rebind
+        .DeviceRebindService.rebind` has already succeeded — this method
+        does not itself verify anything; it purely records that a
+        successful rebind happened, and what it changed.
+        """
+        now = _now()
+        record = UsageRecord(
+            session_id=str(uuid.uuid4()),
+            user=user,
+            machine_id=machine_id,
+            file_id=file_id,
+            usb_id=new_usb_id,
+            previous_usb_id=previous_usb_id,
+            login_time=now,
+            close_time=now,
+            duration_seconds=0.0,
+            authentication_result=True,
+            event_type="device_rebind",
+        )
+        if self._repository is not None:
+            prev_hmac = self._repository.last_entry_hmac()
+            entry = self._log.seal(record, prev_hmac)
+            self._repository.append(record.session_id, entry)
+
+        logger.warning(
+            "Device rebind recorded: file_id=%s user=%s previous_usb_id=%s new_usb_id=%s",
+            file_id,
+            user,
+            previous_usb_id or "unknown",
+            new_usb_id or "unknown",
+        )
+        return record
+
     def read_all_records(self) -> list[UsageRecord]:
         """Decrypt and return every stored record, in original append order."""
         if self._repository is None:

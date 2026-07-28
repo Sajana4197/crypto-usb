@@ -278,9 +278,11 @@ class DashboardPage(BasePage):
         if self._deception_event_repository is not None:
             for event in self._deception_event_repository.list_events():
                 target = event.file_id or "unknown file"
-                entries.append(
-                    (event.generated_at, f"Deception triggered ({event.trigger.value}) on {target}")
-                )
+                description = f"Deception triggered ({event.trigger.value}) on {target}"
+                if not event.device_info.is_empty:
+                    device = event.device_info.label or event.device_info.mount_point or event.device_info.usb_serial
+                    description += f" — presented device: {device}"
+                entries.append((event.generated_at, description))
 
         entries.sort(key=lambda entry: entry[0], reverse=True)
 

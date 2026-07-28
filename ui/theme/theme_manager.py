@@ -146,10 +146,36 @@ QLineEdit, QComboBox {
 QLineEdit:focus, QComboBox:focus {
     border: 1px solid #00e5ff;
 }
+QCheckBox::indicator {
+    width: 15px;
+    height: 15px;
+    border: 1px solid #2a5568;
+    border-radius: 3px;
+    background-color: #0d1720;
+}
+QCheckBox::indicator:hover {
+    border: 1px solid #00b8d4;
+    background-color: #12212c;
+}
+QCheckBox::indicator:checked {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00b8d4, stop:1 #00e5ff);
+    border: 1px solid #6df3ff;
+}
 QFrame#detailsPanel {
     background-color: #060a0f;
     border: 1px solid #113247;
     border-radius: 3px;
+}
+QFrame#bindingPanel {
+    background-color: #0a151c;
+    border: 1px solid #145263;
+    border-radius: 4px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+}
+QLabel#bindingHeading {
+    color: #00e5ff;
+    font-weight: 600;
 }
 QLabel#summaryLabel {
     color: #8fa8b5;
@@ -368,6 +394,31 @@ QLineEdit, QComboBox {
 }
 QLineEdit:focus, QComboBox:focus {
     border: 1px solid #0891b2;
+}
+QCheckBox::indicator {
+    width: 15px;
+    height: 15px;
+    border: 1px solid #b9d8e0;
+    border-radius: 3px;
+    background-color: #ffffff;
+}
+QCheckBox::indicator:hover {
+    border: 1px solid #0891b2;
+}
+QCheckBox::indicator:checked {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0891b2, stop:1 #06b6d4);
+    border: 1px solid #06647a;
+}
+QFrame#bindingPanel {
+    background-color: #e3f3f7;
+    border: 1px solid #8fd4e3;
+    border-radius: 4px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+}
+QLabel#bindingHeading {
+    color: #0891b2;
+    font-weight: 600;
 }
 QFrame#detailsPanel {
     background-color: #ffffff;

@@ -5,11 +5,26 @@ Encryption Keys (FEKs) and RSA key pairs, wrapping/unwrapping FEKs
 through a `KeyWrapper`, and securely destroying key material once it
 is no longer needed. No key material is ever written to a log — only
 algorithm names and object identifiers are logged.
+
+`derive_device_binding_key` below derives a symmetric key from a
+DEVICE_ONLY file's device fingerprint (`validation.usb_identifier`),
+used by `crypto.key_wrapper.DeviceBoundKeyWrapper` to add an outer
+device-bound wrap layer around the FEK for that binding mode. It
+mirrors the labeled-HKDF pattern `metadata.protection`'s
+`derive_protection_keys_from_key_material` already establishes (a
+distinct `info` label per derived key, so different keys derived from
+related input material stay cryptographically independent) — but uses
+full HKDF (extract-then-expand), not `HKDFExpand` alone, since a device
+fingerprint is raw identifying data, not already a uniform, high-entropy
+secret the way that function's scrypt-stretched master secret is.
 """
 
 from __future__ import annotations
 
 from enum import Enum, auto
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from core.logger import get_logger
 from crypto import aes_cipher, rsa_keypair
@@ -19,6 +34,31 @@ from crypto.rsa_keypair import RSAKeyPair
 from crypto.secure_bytes import SecureBytes
 
 logger = get_logger(__name__)
+
+# Distinct HKDF info label, matching the convention `metadata.protection`
+# uses for its own derived keys — keeps this derivation cryptographically
+# independent of any other key ever expanded from related input material.
+_HKDF_INFO_DEVICE_BINDING_KEY = b"crypto-usb:device-binding:wrap-key"
+
+DEVICE_BINDING_KEY_SIZE_BYTES = aes_cipher.AES_KEY_SIZE_BYTES
+
+
+def derive_device_binding_key(device_fingerprint: bytes) -> bytes:
+    """Derive a device-bound AES-256 key from `device_fingerprint`
+    (see `validation.usb_identifier.device_fingerprint_material`).
+
+    Deterministic: the same fingerprint bytes always derive the same
+    key, which is the entire point — encrypting on the enrolled device
+    and later decrypting on the presented device must derive identical
+    keys if and only if the two devices are, cryptographically, the
+    same one.
+    """
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=DEVICE_BINDING_KEY_SIZE_BYTES,
+        salt=None,
+        info=_HKDF_INFO_DEVICE_BINDING_KEY,
+    ).derive(device_fingerprint)
 
 
 class KeyState(Enum):

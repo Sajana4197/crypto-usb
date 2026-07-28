@@ -7,9 +7,9 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from deception.deception_engine import DeceptionEngine
-from deception.event_repository import DeceptionEventRepository
+from deception.event_repository import DeceptionEventRepository, PresentedDeviceInfo
 from deception.triggers import DeceptionTrigger
-from ui.pages.deception_page import DeceptionPage
+from ui.pages.deception_page import DeceptionPage, _format_device_info
 
 
 @pytest.fixture
@@ -109,3 +109,46 @@ def test_refresh_is_a_noop_when_events_are_unchanged(app, event_repository, monk
     page.refresh()  # same events as construction -- nothing changed
 
     assert calls == []
+
+
+# -- Presented device info (Phase 5) -----------------------------------------
+
+
+def test_page_shows_presented_device_column_when_recorded(app, event_repository):
+    engine = DeceptionEngine(rng=random.Random(1), event_repository=event_repository)
+    engine.activate(
+        DeceptionTrigger.DEVICE_MISMATCH,
+        file_id="file-1",
+        device_info=PresentedDeviceInfo(
+            usb_serial="ABCD1234:FAT32:1000000",
+            vendor_id="SANDISK",
+            product_id="CRUZER_BLADE",
+            hardware_serial="4C530001A2B3C4D5",
+            mount_point="E:\\",
+            label="MYUSB",
+        ),
+    )
+
+    page = _make_page(app, event_repository)
+
+    device_cell = page.table.item(0, 4).text()
+    assert "MYUSB" in device_cell
+    assert "SANDISK" in device_cell
+
+
+def test_page_shows_dash_for_events_without_device_info(app, event_repository):
+    engine = DeceptionEngine(rng=random.Random(1), event_repository=event_repository)
+    engine.activate(DeceptionTrigger.WRONG_CREDENTIALS, file_id="file-1")
+
+    page = _make_page(app, event_repository)
+
+    assert page.table.item(0, 4).text() == "—"
+
+
+def test_format_device_info_empty_is_a_dash():
+    assert _format_device_info(PresentedDeviceInfo()) == "—"
+
+
+def test_format_device_info_falls_back_to_usb_serial_when_nothing_else_available():
+    text = _format_device_info(PresentedDeviceInfo(usb_serial="ABCD1234:FAT32:1000000"))
+    assert text == "ABCD1234:FAT32:1000000"

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import QApplication
 
 from crypto.key_wrapper import RSAOAEPKeyWrapper
 from deception.triggers import DeceptionTrigger
-from metadata.models import ExpiryRules, UsagePolicy
+from metadata.models import ExpiryRules, MachineBindingMode, UsagePolicy
 from metadata.protection import generate_protection_keys
 from metadata.repository import MetadataRepository
 from security.account_repository import AccountRepository
@@ -139,7 +139,8 @@ def _store(write_service, source_file, device, key_wrapper, session, metadata_re
         key_wrapper,
         owner_id=session.owner_id,
         metadata_repository=metadata_repository,
-        bind_to_device=True,
+        bind_device=True,
+        machine_binding=MachineBindingMode.CURRENT,
         **kwargs,
     )
 

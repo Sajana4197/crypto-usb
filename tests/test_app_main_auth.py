@@ -1,6 +1,7 @@
 """Tests that app.main.bootstrap() gates the main window behind authentication."""
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PySide6.QtWidgets import QDialog
@@ -120,3 +121,42 @@ def test_bootstrap_runs_exit_cleanup_when_auth_is_cancelled(tmp_path, monkeypatc
         mock_cleanup.assert_called_once_with(CleanupReason.APPLICATION_EXIT)
 
     assert window is None
+
+
+# -- _disable_windows_ghosting --------------------------------------------
+
+
+def test_disable_windows_ghosting_calls_user32_on_windows(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main_module.sys, "platform", "win32")
+    fake_windll = SimpleNamespace(user32=SimpleNamespace(DisableProcessWindowsGhosting=lambda: calls.append(True)))
+    monkeypatch.setattr(main_module.ctypes, "windll", fake_windll, raising=False)
+
+    main_module._disable_windows_ghosting()
+
+    assert calls == [True]
+
+
+def test_disable_windows_ghosting_is_a_noop_off_windows(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main_module.sys, "platform", "linux")
+    fake_windll = SimpleNamespace(user32=SimpleNamespace(DisableProcessWindowsGhosting=lambda: calls.append(True)))
+    monkeypatch.setattr(main_module.ctypes, "windll", fake_windll, raising=False)
+
+    main_module._disable_windows_ghosting()
+
+    assert calls == []
+
+
+def test_disable_windows_ghosting_swallows_a_missing_api(monkeypatch):
+    """Older Windows/Wine environments without this API must not crash
+    startup over what is purely a cosmetic improvement."""
+
+    def _raise():
+        raise OSError("not available")
+
+    monkeypatch.setattr(main_module.sys, "platform", "win32")
+    fake_windll = SimpleNamespace(user32=SimpleNamespace(DisableProcessWindowsGhosting=_raise))
+    monkeypatch.setattr(main_module.ctypes, "windll", fake_windll, raising=False)
+
+    main_module._disable_windows_ghosting()  # must not raise

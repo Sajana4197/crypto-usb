@@ -95,6 +95,39 @@ def test_device_binding_from_dict_without_new_fields_defaults_to_none():
     assert binding.machine_fingerprint is None
 
 
+def test_device_binding_round_trip_with_hardware_descriptor_fields():
+    binding = DeviceBinding(
+        device_id="E:\\",
+        label="My USB",
+        bound=True,
+        usb_serial="ABCD1234:FAT32:1000000",
+        vendor_id="SANDISK",
+        product_id="CRUZER_BLADE",
+        hardware_serial="4C530001A2B3C4D5",
+    )
+    assert DeviceBinding.from_dict(binding.to_dict()) == binding
+
+
+def test_device_binding_defaults_hardware_descriptor_fields_to_none():
+    binding = DeviceBinding()
+    assert binding.vendor_id is None
+    assert binding.product_id is None
+    assert binding.hardware_serial is None
+
+
+def test_device_binding_from_dict_without_hardware_descriptor_fields_defaults_to_none():
+    legacy_data = {
+        "device_id": "E:\\",
+        "label": "My USB",
+        "bound": True,
+        "usb_serial": "ABCD1234:FAT32:1000000",
+    }
+    binding = DeviceBinding.from_dict(legacy_data)
+    assert binding.vendor_id is None
+    assert binding.product_id is None
+    assert binding.hardware_serial is None
+
+
 def test_round_trip_via_json():
     import json
 

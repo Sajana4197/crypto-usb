@@ -9,6 +9,15 @@ events were observed during it. It is never persisted directly —
 `tracking.tamper_evident_log.TamperEvidentLog` encrypts and HMAC-chains
 its serialized form before `tracking.repository` writes it to SQLite,
 mirroring `metadata.models.FileMetadata` / `metadata.protection`.
+
+`event_type` (Phase 6) distinguishes a normal view session ("access",
+the default — everything before this phase) from an explicit device
+rebind ("device_rebind" — see `tracking.tracking_service.UsageTracker
+.record_device_rebind` and `metadata.device_rebind.DeviceRebindService`).
+A rebind reuses this same tamper-evident log rather than a separate
+one, so `previous_usb_id` records what the file *was* bound to
+alongside the existing `usb_id` recording what it's bound to *now* —
+both `None` for an ordinary access record.
 """
 
 from __future__ import annotations
@@ -33,6 +42,8 @@ class UsageRecord:
     validation_result: Optional[bool] = None
     screen_capture_attempts: int = 0
     tampering_events: int = 0
+    event_type: str = "access"
+    previous_usb_id: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +60,8 @@ class UsageRecord:
             "validation_result": self.validation_result,
             "screen_capture_attempts": self.screen_capture_attempts,
             "tampering_events": self.tampering_events,
+            "event_type": self.event_type,
+            "previous_usb_id": self.previous_usb_id,
         }
 
     @classmethod
@@ -67,4 +80,6 @@ class UsageRecord:
             validation_result=data.get("validation_result"),
             screen_capture_attempts=data.get("screen_capture_attempts", 0),
             tampering_events=data.get("tampering_events", 0),
+            event_type=data.get("event_type", "access"),
+            previous_usb_id=data.get("previous_usb_id"),
         )

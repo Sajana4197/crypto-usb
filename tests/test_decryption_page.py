@@ -11,6 +11,7 @@ from __future__ import annotations
 import random
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -328,6 +329,126 @@ def test_view_refused_without_an_authenticated_session(tmp_path, metadata_reposi
     assert "signed in" in page.status_label.text().lower()
 
 
+# -- Explicit device rebind (Phase 6) ----------------------------------------
+
+
+def _write_and_load_key(tmp_path, encryption_page, decryption_page, device, passphrase="a-strong-passphrase"):
+    """Writes a file via `EncryptionPage` (default binding mode:
+    DEVICE_AND_MACHINE), exports its key, and loads that key on
+    `decryption_page` -- the common setup every rebind test needs before
+    it can exercise `_on_rebind_clicked` itself."""
+    source = tmp_path / "findings.txt"
+    source.write_text("the quarterly figures are confidential", encoding="utf-8")
+    device_dir = Path(device.mount_point)
+
+    encryption_page._devices = [device]
+    encryption_page._populate_table()
+    encryption_page.table.selectRow(0)
+    encryption_page._source_path = source
+    encryption_page._update_write_button_state()
+    with patch.object(QInputDialog, "getText", return_value=(passphrase, True)):
+        encryption_page._on_write_clicked()
+
+    written = list(device_dir.glob("*.cusc"))
+    assert len(written) == 1
+
+    exported_key_path = tmp_path / "key.pem"
+    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(exported_key_path), "")):
+        encryption_page._on_export_key_clicked()
+
+    decryption_page._devices = [device]
+    decryption_page._selected_device = device
+    decryption_page._refresh_containers()
+    decryption_page.key_path_label.setText(str(exported_key_path))
+    decryption_page.passphrase_edit.setText(passphrase)
+    decryption_page._on_load_key_clicked()
+    decryption_page.container_table.selectRow(0)
+
+    return written[0]
+
+
+def test_rebind_button_disabled_until_container_and_key_selected(tmp_path, encryption_page, decryption_page):
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    assert decryption_page.rebind_button.isEnabled() is False
+
+    _write_and_load_key(tmp_path, encryption_page, decryption_page, device)
+
+    assert decryption_page.rebind_button.isEnabled() is True
+
+
+def test_successful_rebind_updates_device_binding_and_is_logged(tmp_path, encryption_page, decryption_page, tracker):
+    from metadata.protection import MetadataProtector
+
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    _write_and_load_key(tmp_path, encryption_page, decryption_page, device, passphrase="rebind-passphrase")
+
+    file_id, _ = decryption_page._storage_service.read_encrypted_file_bytes(decryption_page._selected_container)
+    before = MetadataProtector(decryption_page._protection_keys).unprotect(
+        decryption_page._metadata_repository.load(file_id)
+    )
+    assert before.device_binding.bound is True
+
+    with patch.object(QInputDialog, "getText", return_value=("rebind-passphrase", True)):
+        decryption_page._on_rebind_clicked()
+
+    assert "rebound" in decryption_page.status_label.text().lower()
+
+    after = MetadataProtector(decryption_page._protection_keys).unprotect(
+        decryption_page._metadata_repository.load(file_id)
+    )
+    assert after.device_binding.bound is True
+    assert after.device_binding.device_id == device.device_id
+
+    records = tracker.read_all_records()
+    rebind_records = [r for r in records if r.event_type == "device_rebind"]
+    assert len(rebind_records) == 1
+    assert rebind_records[0].file_id == file_id
+    assert rebind_records[0].user == "owner-1"
+
+
+def test_wrong_passphrase_rebind_fails_and_does_not_mutate_binding(tmp_path, encryption_page, decryption_page, tracker):
+    from metadata.protection import MetadataProtector
+
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    _write_and_load_key(tmp_path, encryption_page, decryption_page, device, passphrase="the-real-passphrase")
+
+    file_id, _ = decryption_page._storage_service.read_encrypted_file_bytes(decryption_page._selected_container)
+    before = MetadataProtector(decryption_page._protection_keys).unprotect(
+        decryption_page._metadata_repository.load(file_id)
+    )
+
+    with patch.object(QInputDialog, "getText", return_value=("definitely-the-wrong-passphrase", True)):
+        decryption_page._on_rebind_clicked()
+
+    assert "failed" in decryption_page.status_label.text().lower()
+
+    after = MetadataProtector(decryption_page._protection_keys).unprotect(
+        decryption_page._metadata_repository.load(file_id)
+    )
+    assert after.device_binding == before.device_binding
+    assert after.wrapped_key == before.wrapped_key
+    assert all(r.event_type != "device_rebind" for r in tracker.read_all_records())
+
+
+def test_rebind_cancelled_passphrase_prompt_does_nothing(tmp_path, encryption_page, decryption_page, tracker):
+    device_dir = tmp_path / "usb"
+    device_dir.mkdir()
+    device = _device(str(device_dir))
+    _write_and_load_key(tmp_path, encryption_page, decryption_page, device)
+
+    with patch.object(QInputDialog, "getText", return_value=("", False)):
+        decryption_page._on_rebind_clicked()
+
+    assert "cancelled" in decryption_page.status_label.text().lower()
+    assert all(r.event_type != "device_rebind" for r in tracker.read_all_records())
+
+
 def test_wrong_passphrase_loads_a_decoy_key_instead_of_failing(tmp_path, decryption_page):
     from crypto import rsa_keypair
 
@@ -520,6 +641,52 @@ def test_view_click_does_not_force_deception_for_a_real_session(
 
         _, kwargs = mock_service_cls.return_value.attempt_access.call_args
         assert kwargs["force_deception"] is False
+    finally:
+        if decryption_page._active_viewer is not None and not decryption_page._active_viewer.is_closed:
+            decryption_page._active_viewer.close()
+
+
+def test_view_click_passes_current_hardware_descriptor_for_selected_device(
+    tmp_path, decryption_page, monkeypatch
+):
+    """Phase 2: the rich hardware descriptor is computed for whatever
+    device is currently selected and threaded into `attempt_access`
+    exactly like `current_usb_identifier`/`current_machine_fingerprint`."""
+    from validation.usb_identifier import HardwareDescriptor
+
+    device = _device(str(tmp_path))
+    decryption_page._selected_device = device
+    descriptor = HardwareDescriptor(vendor_id="SANDISK", product_id="CRUZER_BLADE", hardware_serial="ABC123")
+    monkeypatch.setattr(
+        "ui.pages.decryption_page.compute_hardware_descriptor", lambda d: descriptor if d is device else None
+    )
+    mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path, granted=True)
+
+    try:
+        with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+            mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+            decryption_page._on_view_clicked()
+
+        _, kwargs = mock_service_cls.return_value.attempt_access.call_args
+        assert kwargs["current_hardware_descriptor"] == descriptor
+    finally:
+        if decryption_page._active_viewer is not None and not decryption_page._active_viewer.is_closed:
+            decryption_page._active_viewer.close()
+
+
+def test_view_click_passes_none_hardware_descriptor_when_no_device_selected(
+    tmp_path, decryption_page
+):
+    decryption_page._selected_device = None
+    mock_outcome = _stub_attempt_access_call(decryption_page, tmp_path, granted=True)
+
+    try:
+        with patch("ui.pages.decryption_page.SecureAccessService") as mock_service_cls:
+            mock_service_cls.return_value.attempt_access.return_value = mock_outcome
+            decryption_page._on_view_clicked()
+
+        _, kwargs = mock_service_cls.return_value.attempt_access.call_args
+        assert kwargs["current_hardware_descriptor"] is None
     finally:
         if decryption_page._active_viewer is not None and not decryption_page._active_viewer.is_closed:
             decryption_page._active_viewer.close()
@@ -990,3 +1157,34 @@ def test_one_time_access_burn_via_portable_metadata_also_invalidates_the_local_c
 
     assert outcome.granted is False
     assert "content" not in captured
+
+
+# -- Content-type sniffing (view-time only signal, see module docstring) --
+
+
+def test_sniff_content_type_detects_mp4_from_ftyp_box():
+    from ui.pages.decryption_page import _sniff_content_type
+
+    # A minimal, realistic ISO-BMFF header: 4-byte box size, then "ftyp",
+    # then a major brand -- exactly what every real MP4 starts with,
+    # regardless of anything after it.
+    mp4_bytes = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41"
+
+    assert _sniff_content_type(mp4_bytes) == "video/mp4"
+
+
+def test_sniff_content_type_leaves_other_formats_undisturbed():
+    from ui.pages.decryption_page import _sniff_content_type
+
+    assert _sniff_content_type(b"%PDF-1.4 rest of a pdf") == "application/pdf"
+    assert _sniff_content_type(b"\x89PNG\r\n\x1a\n rest") == "image/png"
+    assert _sniff_content_type(b"plain confidential text") == "text/plain"
+
+
+def test_sniff_content_type_falls_back_to_octet_stream_for_unknown_binary():
+    from ui.pages.decryption_page import _sniff_content_type
+
+    # Bare UTF-8 continuation bytes with no leading byte: invalid UTF-8,
+    # unlike low-range control bytes (0x00-0x08), which decode as valid
+    # (if unlikely) UTF-8 and would land on "text/plain" instead.
+    assert _sniff_content_type(b"\x80\x81\x82\x83\x84\x85\x86\x87\x88") == "application/octet-stream"

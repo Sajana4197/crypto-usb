@@ -1,7 +1,7 @@
-"""The Secure Controlled Viewer: renders decrypted PDF/image/text content
-entirely in memory, with every in-app copy/export/print/edit path
-disabled and the strongest reasonably available Windows screen-capture
-mitigation applied.
+"""The Secure Controlled Viewer: renders decrypted PDF/image/text/video
+content entirely in memory, with every in-app copy/export/print/edit
+path disabled and the strongest reasonably available Windows
+screen-capture mitigation applied.
 
 Implements `viewer.interfaces.ViewerBackend`'s method signatures
 (`display`/`close`) by duck typing rather than formal inheritance:
@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QUrl, Qt, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QContextMenuEvent,
@@ -49,6 +49,8 @@ from PySide6.QtGui import (
     QPixmap,
     QShowEvent,
 )
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (
@@ -56,6 +58,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QSlider,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -74,6 +77,7 @@ logger = get_logger(__name__)
 
 CONTENT_TYPE_TXT = "text/plain"
 CONTENT_TYPE_PDF = "application/pdf"
+CONTENT_TYPE_MP4 = "video/mp4"
 _IMAGE_PREFIX = "image/"
 
 # Zoom step/bounds shared by the PDF and image zoom controls (text zoom is
@@ -155,10 +159,16 @@ class _SecurePdfView(_NoCopyMixin, QPdfView):
         self.setPageMode(QPdfView.PageMode.MultiPage)
 
 
+class _SecureVideoView(_NoCopyMixin, QVideoWidget):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._lockdown()
+
+
 class SecureViewerWidget(QWidget):
     """A `ViewerBackend`-shaped widget: `display(content, content_type)`
-    and `close()`. Renders TXT, images, and PDF entirely from in-memory
-    bytes; nothing here ever reads or writes a file."""
+    and `close()`. Renders TXT, images, PDF, and MP4 video entirely from
+    in-memory bytes; nothing here ever reads or writes a file."""
 
     # Emitted exactly once, at the end of `_teardown()`, regardless of
     # whether the window was closed by the user or by capture detection —
@@ -187,6 +197,16 @@ class SecureViewerWidget(QWidget):
         self._pdf_view.setDocument(self._pdf_document)
         self._pdf_buffer: Optional[QBuffer] = None
 
+        self._video_view = _SecureVideoView()
+        self._media_player = QMediaPlayer(self)
+        self._audio_output = QAudioOutput(self)
+        self._media_player.setAudioOutput(self._audio_output)
+        self._media_player.setVideoOutput(self._video_view)
+        self._media_player.durationChanged.connect(self._on_video_duration_changed)
+        self._media_player.positionChanged.connect(self._on_video_position_changed)
+        self._media_player.playbackStateChanged.connect(self._on_video_playback_state_changed)
+        self._video_buffer: Optional[QBuffer] = None
+
         # Original, unscaled pixmap for the currently displayed image —
         # `_label_view.pixmap()` only ever holds the current *scaled*
         # render, so zooming needs a separate source to re-scale from
@@ -205,10 +225,17 @@ class SecureViewerWidget(QWidget):
         self._stack.addWidget(self._text_view)
         self._stack.addWidget(self._label_view)
         self._stack.addWidget(self._pdf_view)
+        self._stack.addWidget(self._video_view)
+
+        self._zoom_toolbar_widget = QWidget()
+        self._zoom_toolbar_widget.setLayout(self._build_zoom_toolbar())
+        self._video_controls_widget = self._build_video_controls()
+        self._video_controls_widget.setVisible(False)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(self._build_zoom_toolbar())
+        layout.addWidget(self._zoom_toolbar_widget)
+        layout.addWidget(self._video_controls_widget)
         layout.addWidget(self._stack)
 
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
@@ -239,11 +266,36 @@ class SecureViewerWidget(QWidget):
         toolbar.addStretch(1)
         return toolbar
 
+    def _build_video_controls(self) -> QWidget:
+        container = QWidget()
+        controls = QHBoxLayout(container)
+        controls.setContentsMargins(0, 0, 0, 0)
+
+        self.play_pause_button = QPushButton("Pause")
+        self.play_pause_button.clicked.connect(self._toggle_video_playback)
+        controls.addWidget(self.play_pause_button)
+
+        self._video_position_slider = QSlider(Qt.Orientation.Horizontal)
+        # Seeking only ever happens via user drag (`sliderMoved`), never
+        # `valueChanged` — that signal also fires from the programmatic
+        # `setValue` call in `_on_video_position_changed` below, which
+        # would otherwise fight the player for the current position on
+        # every played frame.
+        self._video_position_slider.sliderMoved.connect(self._media_player.setPosition)
+        controls.addWidget(self._video_position_slider, 1)
+
+        return container
+
     # -- ViewerBackend contract ----------------------------------------
 
     def display(self, content: bytes, content_type: str) -> None:
         if self._closed:
             raise RuntimeError("Cannot display content on a closed SecureViewerWidget")
+
+        self._stop_video()
+        is_video = content_type == CONTENT_TYPE_MP4
+        self._zoom_toolbar_widget.setVisible(not is_video)
+        self._video_controls_widget.setVisible(is_video)
 
         if content_type == CONTENT_TYPE_TXT:
             self._show_text(content)
@@ -251,6 +303,8 @@ class SecureViewerWidget(QWidget):
             self._show_pdf(content)
         elif content_type.startswith(_IMAGE_PREFIX):
             self._show_image(content)
+        elif is_video:
+            self._show_video(content)
         else:
             self._show_unsupported(content_type)
 
@@ -304,6 +358,40 @@ class SecureViewerWidget(QWidget):
         self._pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
         self._stack.setCurrentWidget(self._pdf_view)
         self._update_zoom_label()
+
+    def _show_video(self, content: bytes) -> None:
+        buffer = QBuffer(self)
+        buffer.setData(QByteArray(content))
+        buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        self._video_buffer = buffer
+        # The URL carries no data of its own — it's only a ".mp4" filename
+        # hint so Qt's demuxer plugin selection isn't guessing the
+        # container format from content alone. The bytes are read only
+        # from `buffer`, in RAM; nothing here is ever read from disk.
+        self._media_player.setSourceDevice(buffer, QUrl("stream.mp4"))
+        self._stack.setCurrentWidget(self._video_view)
+        self._media_player.play()
+
+    def _stop_video(self) -> None:
+        self._media_player.stop()
+        if self._video_buffer is not None:
+            self._video_buffer.close()
+            self._video_buffer = None
+
+    def _toggle_video_playback(self) -> None:
+        if self._media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._media_player.pause()
+        else:
+            self._media_player.play()
+
+    def _on_video_duration_changed(self, duration_ms: int) -> None:
+        self._video_position_slider.setRange(0, duration_ms)
+
+    def _on_video_position_changed(self, position_ms: int) -> None:
+        self._video_position_slider.setValue(position_ms)
+
+    def _on_video_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        self.play_pause_button.setText("Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "Play")
 
     def _show_unsupported(self, content_type: str) -> None:
         self._original_image_pixmap = None
@@ -441,6 +529,7 @@ class SecureViewerWidget(QWidget):
         if self._pdf_buffer is not None:
             self._pdf_buffer.close()
             self._pdf_buffer = None
+        self._stop_video()
 
         self._printscreen_watcher.stop()
         if self._capture_protection is not None:
@@ -469,4 +558,5 @@ class SecureViewerWidget(QWidget):
         if self._pdf_buffer is not None:
             self._pdf_buffer.close()
             self._pdf_buffer = None
+        self._stop_video()
         self.close()

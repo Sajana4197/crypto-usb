@@ -33,6 +33,23 @@ re-derived and decrypted on any machine that has the private key and
 passphrase, with no local database, and no second file, required. It
 is additive: omitting these two parameters writes exactly as before,
 with no portable section.
+
+Device binding and machine binding (Phase 7) are two independent axes —
+`bind_device: bool` and `machine_binding: metadata.models.MachineBindingMode`
+— chosen separately by the caller rather than one flat mode. Whenever
+`bind_device` is True and `machine_binding` is `NONE` (the old `DEVICE_ONLY`
+combination), this goes one step further than policy-only device binding:
+the FEK's wrapped key is additionally encrypted under a key derived from
+this device's own fingerprint (`validation.usb_identifier
+.device_fingerprint_material`, `crypto.key_manager.derive_device_binding_key`,
+`crypto.key_wrapper.DeviceBoundKeyWrapper`), so presenting a different
+device doesn't just fail `validation.device_binding_validator`'s policy
+check later — it derives the wrong key and decryption fails outright. Any
+machine binding (`CURRENT` or `SPECIFIC`) skips this layer entirely —
+cryptographic device binding is fundamentally incompatible with ever
+validating the same key against a different, still-authorized machine,
+which is exactly what a machine-bound (rather than device-bound) file
+must support.
 """
 
 from __future__ import annotations
@@ -45,10 +62,17 @@ from typing import Optional
 
 from core.logger import get_logger
 from crypto.file_encryptor import FileEncryptor
-from crypto.key_manager import KeyManager
-from crypto.key_wrapper import KeyWrapper
+from crypto.key_manager import KeyManager, derive_device_binding_key
+from crypto.key_wrapper import DeviceBoundKeyWrapper, KeyWrapper
 from metadata.hashing import compute_integrity_hash
-from metadata.models import CURRENT_METADATA_VERSION, DeviceBinding, ExpiryRules, FileMetadata, UsagePolicy
+from metadata.models import (
+    CURRENT_METADATA_VERSION,
+    DeviceBinding,
+    ExpiryRules,
+    FileMetadata,
+    MachineBindingMode,
+    UsagePolicy,
+)
 from metadata.portable_envelope import PortableMetadataEnvelope
 from metadata.protection import MetadataProtectionKeys, MetadataProtector, generate_protection_keys
 from metadata.repository import MetadataRepository
@@ -56,7 +80,11 @@ from usb.device_detector import USBDevice
 from usb.secure_container import SecureContainer, verify_container_deep
 from usb.storage_writer import SecureStorageWriter
 from validation.machine_fingerprint import compute_machine_fingerprint
-from validation.usb_identifier import compute_usb_identifier
+from validation.usb_identifier import (
+    compute_hardware_descriptor,
+    compute_usb_identifier,
+    device_fingerprint_material,
+)
 
 logger = get_logger(__name__)
 
@@ -96,7 +124,9 @@ class SecureStorageService:
         metadata_repository: Optional[MetadataRepository] = None,
         expiry_rules: Optional[ExpiryRules] = None,
         usage_policy: Optional[UsagePolicy] = None,
-        bind_to_device: bool = False,
+        bind_device: bool = False,
+        machine_binding: MachineBindingMode = MachineBindingMode.NONE,
+        target_machine_fingerprint: Optional[str] = None,
         portable_metadata_keys: Optional[MetadataProtectionKeys] = None,
         portable_metadata_salt: Optional[bytes] = None,
     ) -> SecureWriteResult:
@@ -111,9 +141,18 @@ class SecureStorageService:
         see the module docstring for why both copies exist. `expiry_rules`
         / `usage_policy` (e.g. one-time access) are enforced later by
         `validation.validation_engine`, which only ever consults the
-        repository copy. When `bind_to_device` is True, this file can
-        only ever be validated again from this same physical USB device
-        and host machine (`validation.device_binding_validator`).
+        repository copy. `bind_device`/`machine_binding` control what this
+        file can be validated against later
+        (`validation.device_binding_validator`) — two independent axes
+        (Phase 7), not one flat mode: `bind_device=True` binds to this USB
+        device; `machine_binding` separately binds to no machine (`NONE`,
+        the default), the current machine (`CURRENT`), or a specific,
+        not-currently-running machine identified by
+        `target_machine_fingerprint` (`SPECIFIC` — required together).
+        Leaving both at their defaults binds to neither, relying solely on
+        the exported private key + passphrase — required for the
+        portable-metadata cross-machine recovery feature to ever apply to
+        this file.
 
         When `portable_metadata_keys` and `portable_metadata_salt` are
         both given, a third protected copy of the same metadata is
@@ -124,22 +163,14 @@ class SecureStorageService:
         if (portable_metadata_keys is None) != (portable_metadata_salt is None):
             raise ValueError("portable_metadata_keys and portable_metadata_salt must be supplied together")
         source_path = Path(source_path)
-        file_container = self._file_encryptor.encrypt_bytes(source_path.read_bytes(), key_wrapper)
+
+        device_binding, effective_wrapper = self._device_binding_and_wrapper(
+            key_wrapper, device, bind_device, machine_binding, target_machine_fingerprint
+        )
+        file_container = self._file_encryptor.encrypt_bytes(source_path.read_bytes(), effective_wrapper)
 
         integrity_hash = compute_integrity_hash(file_container.serialize())
         file_id = str(uuid.uuid4())
-
-        device_binding = (
-            DeviceBinding(
-                device_id=device.device_id,
-                label=device.label,
-                bound=True,
-                usb_serial=compute_usb_identifier(device),
-                machine_fingerprint=compute_machine_fingerprint(),
-            )
-            if bind_to_device
-            else DeviceBinding()
-        )
 
         metadata = FileMetadata(
             file_id=file_id,
@@ -206,10 +237,78 @@ class SecureStorageService:
         container_path: Path,
         key_wrapper: KeyWrapper,
         protection_keys: MetadataProtectionKeys,
+        device: Optional[USBDevice] = None,
+        bind_device: bool = False,
+        machine_binding: MachineBindingMode = MachineBindingMode.NONE,
     ) -> bool:
         """Deep-verify a previously stored container: unwrap, decrypt, and check
         metadata integrity entirely in memory. Never exposes plaintext.
+
+        `device`/`bind_device`/`machine_binding` must match what the file
+        was originally written with whenever `bind_device` is True and
+        `machine_binding` is `NONE` (the cryptographic device-binding
+        combination) — this reconstructs the same device-bound outer
+        key-wrap layer `store_file` added, since a plain `key_wrapper`
+        alone can no longer unwrap that file's key (see the module
+        docstring). Omit all three (the defaults) for any machine-bound
+        or fully portable file, exactly as before this parameter existed.
         """
+        effective_wrapper = key_wrapper
+        if bind_device and machine_binding is MachineBindingMode.NONE:
+            if device is None:
+                raise ValueError("device is required to verify a device-only-bound container")
+            _, effective_wrapper = self._device_binding_and_wrapper(key_wrapper, device, bind_device, machine_binding)
+
         container = self._storage_writer.read_container(Path(container_path))
         protector = MetadataProtector(protection_keys)
-        return verify_container_deep(container, self._key_manager, key_wrapper, protector)
+        return verify_container_deep(container, self._key_manager, effective_wrapper, protector)
+
+    @staticmethod
+    def _device_binding_and_wrapper(
+        key_wrapper: KeyWrapper,
+        device: Optional[USBDevice],
+        bind_device: bool,
+        machine_binding: MachineBindingMode,
+        target_machine_fingerprint: Optional[str] = None,
+    ) -> tuple[DeviceBinding, KeyWrapper]:
+        """Build this file's `DeviceBinding` record for the two independent
+        `bind_device`/`machine_binding` axes (Phase 7), and — only when
+        `bind_device` is True and `machine_binding` is `NONE` — an outer
+        device-bound `KeyWrapper` derived from that same device's current
+        fingerprint (see the module docstring). Both are built from the
+        same underlying `compute_usb_identifier`/`compute_hardware_descriptor`
+        calls, so what's recorded in metadata and what's cryptographically
+        enforced can never drift apart from each other.
+        """
+        if machine_binding is MachineBindingMode.SPECIFIC and target_machine_fingerprint is None:
+            raise ValueError("target_machine_fingerprint is required when machine_binding is SPECIFIC")
+
+        machine_fingerprint: Optional[str] = None
+        if machine_binding is MachineBindingMode.CURRENT:
+            machine_fingerprint = compute_machine_fingerprint()
+        elif machine_binding is MachineBindingMode.SPECIFIC:
+            machine_fingerprint = target_machine_fingerprint
+
+        if not bind_device:
+            return DeviceBinding(machine_fingerprint=machine_fingerprint), key_wrapper
+
+        assert device is not None
+        hardware_descriptor = compute_hardware_descriptor(device)
+        usb_serial = compute_usb_identifier(device)
+        device_binding = DeviceBinding(
+            device_id=device.device_id,
+            label=device.label,
+            bound=True,
+            usb_serial=usb_serial,
+            machine_fingerprint=machine_fingerprint,
+            vendor_id=hardware_descriptor.vendor_id if hardware_descriptor else None,
+            product_id=hardware_descriptor.product_id if hardware_descriptor else None,
+            hardware_serial=hardware_descriptor.hardware_serial if hardware_descriptor else None,
+        )
+
+        effective_wrapper = key_wrapper
+        if machine_binding is MachineBindingMode.NONE:
+            device_key = derive_device_binding_key(device_fingerprint_material(usb_serial, hardware_descriptor))
+            effective_wrapper = DeviceBoundKeyWrapper(key_wrapper, device_key)
+
+        return device_binding, effective_wrapper

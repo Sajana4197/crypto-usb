@@ -29,6 +29,28 @@ instead of being reported to the caller as an error:
 The caller never learns *why* access was refused, and neither does
 whoever is attempting it.
 
+Every `deception_engine.activate` call here also passes `device_info`
+(`deception.event_repository.PresentedDeviceInfo`) — whatever
+`current_device`/`current_usb_identifier`/`current_hardware_descriptor`
+this attempt was actually made with, bundled by `_presented_device_info`.
+This is forensic-only (Phase 5): it lets the recorded deception event
+answer "what device tried this" for a `DEVICE_MISMATCH`, but is
+attached uniformly to every trigger for a consistent audit trail, not
+just device-related ones.
+
+For a file bound to its USB device with no machine binding (detected
+here as `device_binding.bound` with no `machine_fingerprint` recorded —
+see `metadata.models.MachineBindingMode.NONE`), `key_wrapper` is
+additionally wrapped in a `crypto.key_wrapper.DeviceBoundKeyWrapper`
+derived from the *currently presented* device's fingerprint
+(`current_usb_identifier`/`current_hardware_descriptor` — already
+computed by the caller for `validation.device_binding_validator`'s own,
+separate policy check) — see `usb.secure_storage_service` for why this
+exists: an attacker who somehow got past every policy check with the
+wrong device still can't decrypt, because the wrong device derives the
+wrong key outright. This never applies to a file with any machine
+binding, or to a fully portable file.
+
 Metadata's `wrapped_key` — not the `wrapped_key` embedded in the
 container bytes handed to `attempt_access` — is treated as the
 authoritative key-wrapping state for every decrypt attempt. Burning a
@@ -54,6 +76,21 @@ anticipates ("not yet wired into ... validation.validation_engine ...
 composition root that already runs validation, rather than inside
 `ValidationEngine` itself, since only this class has one attempt's
 full lifecycle in view from start to finish.
+
+`device_mismatch_throttle` (`security.device_mismatch_throttle.DeviceMismatchThrottle`)
+rate-limits repeated `DEVICE_MISMATCH` attempts against the same
+`file_id`, mirroring `security.lockout_policy.LockoutPolicy`'s
+escalating-lockout shape — otherwise an unlimited number of different
+USB devices could be tried against the same file, each one
+independently deceived with no escalation. Once throttled, further
+attempts are deceived immediately, without even running
+`ValidationEngine` again — the same "reject before doing the real
+check" shape `security.auth_controller._require_unlocked_account`
+already uses for a locked account. A default, fresh instance is
+constructed if none is supplied, but — like `deception_engine` and
+`usage_tracker` — it must be constructed once and reused across calls
+for the throttling to actually accumulate; see
+`ui.pages.decryption_page.DecryptionPage` for the real usage.
 """
 
 from __future__ import annotations
@@ -66,18 +103,22 @@ from typing import Callable, Optional, Sequence
 from core.logger import get_logger
 from crypto.exceptions import DecryptionError, KeyUnwrappingError
 from crypto.file_encryptor import EncryptedContainer
-from crypto.key_wrapper import KeyWrapper
+from crypto.key_manager import derive_device_binding_key
+from crypto.key_wrapper import DeviceBoundKeyWrapper, KeyWrapper
 from crypto.secure_bytes import SecureBytes
 from crypto.secure_cleanup import CleanupReason, cleanup
 from crypto.secure_decryptor import SecureDecryptor
 from deception.deception_engine import DeceptionEngine, DeceptionResponse
+from deception.event_repository import PresentedDeviceInfo
 from deception.triggers import DeceptionTrigger
 from metadata.models import FileMetadata
 from metadata.one_time_access import OneTimeAccessEnforcer
 from metadata.protection import MetadataProtectionKeys, MetadataProtector
 from metadata.repository import MetadataRepository
+from security.device_mismatch_throttle import DeviceMismatchThrottle
 from tracking.tracking_service import UsageTracker
 from usb.device_detector import USBDevice
+from validation.usb_identifier import HardwareDescriptor, device_fingerprint_material
 from validation.validation_engine import ValidationEngine, ValidationReport
 
 logger = get_logger(__name__)
@@ -93,7 +134,28 @@ _DEVICE_CHECK_NAMES = (
     "cloned_usb",
     "usb_identifier",
     "machine_fingerprint",
+    "hardware_descriptor",
 )
+
+
+def _presented_device_info(
+    current_device: Optional[USBDevice],
+    current_usb_identifier: Optional[str],
+    current_hardware_descriptor: Optional[HardwareDescriptor],
+) -> PresentedDeviceInfo:
+    """Bundle whatever was actually presented for this attempt into one
+    forensic record (Phase 5) — reusing the exact fields Phase 2 already
+    computes for `validation.device_binding_validator`'s own policy
+    check, so no new device-identity computation is introduced here."""
+    descriptor = current_hardware_descriptor or HardwareDescriptor()
+    return PresentedDeviceInfo(
+        usb_serial=current_usb_identifier,
+        vendor_id=descriptor.vendor_id,
+        product_id=descriptor.product_id,
+        hardware_serial=descriptor.hardware_serial,
+        mount_point=current_device.mount_point if current_device else None,
+        label=current_device.label if current_device else None,
+    )
 
 
 def _map_validation_failure_to_trigger(report: ValidationReport) -> DeceptionTrigger:
@@ -159,6 +221,7 @@ class SecureAccessService:
         enforcer: Optional[OneTimeAccessEnforcer] = None,
         usage_tracker: Optional[UsageTracker] = None,
         mirror_repositories: Sequence[MetadataRepository] = (),
+        device_mismatch_throttle: Optional[DeviceMismatchThrottle] = None,
     ) -> None:
         """`mirror_repositories` — see `metadata.one_time_access.OneTimeAccessEnforcer`
         — are any other repositories holding their own protected copy of
@@ -172,6 +235,7 @@ class SecureAccessService:
         self._deception_engine = deception_engine or DeceptionEngine()
         self._enforcer = enforcer or OneTimeAccessEnforcer(repository, mirror_repositories=mirror_repositories)
         self._usage_tracker = usage_tracker
+        self._device_mismatch_throttle = device_mismatch_throttle or DeviceMismatchThrottle()
 
     def attempt_access(
         self,
@@ -183,6 +247,7 @@ class SecureAccessService:
         current_device: Optional[USBDevice] = None,
         current_usb_identifier: Optional[str] = None,
         current_machine_fingerprint: Optional[str] = None,
+        current_hardware_descriptor: Optional[HardwareDescriptor] = None,
         user: Optional[str] = None,
         force_deception: bool = False,
         container_path: Optional[Path] = None,
@@ -221,11 +286,28 @@ class SecureAccessService:
         real key material is touched, so a decoy caller never gets near
         real metadata, real keys, or real decrypted content.
         """
+        device_info = _presented_device_info(current_device, current_usb_identifier, current_hardware_descriptor)
+
         if force_deception:
-            deception = self._deception_engine.activate(DeceptionTrigger.WRONG_CREDENTIALS, file_id=file_id)
+            deception = self._deception_engine.activate(
+                DeceptionTrigger.WRONG_CREDENTIALS, file_id=file_id, device_info=device_info
+            )
             logger.warning(
                 "Access attempt for file_id=%s forced into deception (decoy session); deception activated",
                 file_id,
+            )
+            return AccessOutcome(granted=False, file_id=file_id, deception=deception)
+
+        if self._device_mismatch_throttle.is_locked(file_id):
+            seconds = self._device_mismatch_throttle.seconds_remaining(file_id)
+            deception = self._deception_engine.activate(
+                DeceptionTrigger.DEVICE_MISMATCH, file_id=file_id, device_info=device_info
+            )
+            logger.warning(
+                "Access attempt for file_id=%s rejected: throttled after repeated device-mismatch "
+                "attempts (%ds remaining); deception activated without re-running validation",
+                file_id,
+                seconds,
             )
             return AccessOutcome(granted=False, file_id=file_id, deception=deception)
 
@@ -241,12 +323,19 @@ class SecureAccessService:
 
         engine = ValidationEngine(self._repository, MetadataProtector(protection_keys))
         report = engine.validate(
-            file_id, encrypted_file_bytes, current_device, current_usb_identifier, current_machine_fingerprint
+            file_id,
+            encrypted_file_bytes,
+            current_device,
+            current_usb_identifier,
+            current_machine_fingerprint,
+            current_hardware_descriptor,
         )
 
         if not report.ok:
             trigger = _map_validation_failure_to_trigger(report)
-            deception = self._deception_engine.activate(trigger, file_id=file_id)
+            if trigger is DeceptionTrigger.DEVICE_MISMATCH:
+                self._device_mismatch_throttle.register_mismatch(file_id)
+            deception = self._deception_engine.activate(trigger, file_id=file_id, device_info=device_info)
             logger.warning(
                 "Access denied for file_id=%s (trigger=%s); deception activated", file_id, trigger.value
             )
@@ -269,6 +358,7 @@ class SecureAccessService:
 
         if record is not None:
             self._usage_tracker.record_validation_result(record, True)
+        self._device_mismatch_throttle.register_success(file_id)
 
         metadata = report.metadata
         assert metadata is not None
@@ -284,13 +374,25 @@ class SecureAccessService:
         # exist on disk.
         container.wrapped_key = metadata.wrapped_key
 
+        # DEVICE_ONLY binding mode (see the module docstring): the wrong
+        # device derives the wrong key here and fails to decrypt outright,
+        # never merely relying on the policy check already run above.
+        effective_wrapper = key_wrapper
+        if metadata.device_binding.bound and metadata.device_binding.machine_fingerprint is None:
+            device_key = derive_device_binding_key(
+                device_fingerprint_material(current_usb_identifier, current_hardware_descriptor)
+            )
+            effective_wrapper = DeviceBoundKeyWrapper(key_wrapper, device_key)
+
         try:
             if record is not None:
                 self._usage_tracker.record_open(record)
-            with self._decryptor.open_decrypted(container, key_wrapper) as buffer:
+            with self._decryptor.open_decrypted(container, effective_wrapper) as buffer:
                 on_granted(buffer, metadata)
         except (KeyUnwrappingError, DecryptionError):
-            deception = self._deception_engine.activate(DeceptionTrigger.ACCESS_ALREADY_USED, file_id=file_id)
+            deception = self._deception_engine.activate(
+                DeceptionTrigger.ACCESS_ALREADY_USED, file_id=file_id, device_info=device_info
+            )
             logger.warning(
                 "Decryption failed for file_id=%s despite passing validation "
                 "(one-time access already consumed, or invalid key material); deception activated",
@@ -312,7 +414,7 @@ class SecureAccessService:
 
         new_keys = protection_keys
         if metadata.usage_policy.one_time_access:
-            new_keys = self._enforcer.burn(metadata, key_wrapper, protection_keys)
+            new_keys = self._enforcer.burn(metadata, effective_wrapper, protection_keys)
             if container_path is not None:
                 try:
                     Path(container_path).unlink()
