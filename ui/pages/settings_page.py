@@ -20,11 +20,12 @@ from __future__ import annotations
 import platform
 from typing import Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFormLayout,
+    QFrame,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -50,6 +51,47 @@ from ui.widgets.busy import show_result_popup
 from validation.machine_fingerprint import compute_machine_fingerprint
 
 logger = get_logger(__name__)
+
+# How long "Delete Account"'s confirmation Yes button stays disabled,
+# counting down in its own label -- long enough that a reflexive
+# double-click on the original button can't also dismiss the warning
+# meant to make the user actually read it.
+_DELETE_CONFIRM_SECONDS = 10
+
+_DELETE_CONFIRM_ENABLED_STYLE = "background-color: #e5484d; color: white; font-weight: 600;"
+
+
+def arm_countdown_button(button: QPushButton, timer: QTimer, seconds: int) -> None:
+    """Disable `button`, label it with a live countdown from `seconds`,
+    and re-enable it (styled red) once `timer` has ticked `seconds`
+    times. `timer` is expected to already be parented/owned by whatever
+    dialog `button` belongs to; this only configures its interval and
+    connects its `timeout` -- starting it is the caller's job, done only
+    after this setup so the button is already showing "seconds" and
+    disabled the instant the dialog appears.
+
+    A free function (not a method) so a test can drive it directly
+    against a bare `QPushButton`/`QTimer` — firing `timer.timeout.emit()`
+    to simulate ticks — without ever going through a real, blocking
+    modal dialog.
+    """
+    remaining = {"value": seconds}
+    button.setEnabled(False)
+    button.setText(f"Yes ({seconds})")
+
+    def _tick() -> None:
+        remaining["value"] -= 1
+        if remaining["value"] <= 0:
+            timer.stop()
+            button.setText("Yes")
+            button.setEnabled(True)
+            button.setStyleSheet(_DELETE_CONFIRM_ENABLED_STYLE)
+        else:
+            button.setText(f"Yes ({remaining['value']})")
+
+    timer.setInterval(1000)
+    timer.timeout.connect(_tick)
+    timer.start()
 
 
 class SettingsPage(BasePage):
@@ -258,9 +300,10 @@ class SettingsPage(BasePage):
     # -- Danger zone: delete account -------------------------------------------
 
     def _build_danger_zone_section(self) -> QWidget:
-        section = QWidget()
+        section = QFrame()
+        section.setObjectName("dangerZonePanel")
         layout = QVBoxLayout(section)
-        layout.setContentsMargins(0, 18, 0, 0)
+        layout.setContentsMargins(14, 12, 14, 12)
 
         heading = QLabel("Danger Zone")
         heading.setStyleSheet("font-weight: 600; font-size: 12pt; color: #e5484d;")
@@ -328,17 +371,24 @@ class SettingsPage(BasePage):
             self._set_delete_account_status("Enter your current password.", error=True)
             return
 
-        confirmed = QMessageBox.warning(
-            self,
-            "Delete Account",
-            "This permanently deletes your account's sign-in credential, protected "
-            "file metadata, usage tracking log, and deception event history. This "
-            "cannot be undone, and you will be taken to account creation afterward.\n\n"
-            "Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if confirmed != QMessageBox.StandardButton.Yes:
+        # Verify the password *before* asking "are you sure?" -- a wrong
+        # password should never reach a confirmation prompt for a
+        # deletion it was never going to be allowed to perform.
+        try:
+            self._auth_controller.verify_password(self._owner_id, password)
+        except AccountLockedError as exc:
+            self._set_delete_account_status(
+                f"Account locked: try again in {exc.seconds_remaining} second(s).", error=True, important=True
+            )
+            return
+        except InvalidCredentialsError as exc:
+            self._set_delete_account_status(str(exc), error=True, important=True)
+            return
+        except SecurityError as exc:
+            self._set_delete_account_status(str(exc), error=True, important=True)
+            return
+
+        if not self._confirm_delete_account():
             return
 
         try:
@@ -358,6 +408,33 @@ class SettingsPage(BasePage):
         self.delete_account_password_edit.clear()
         logger.warning("Account deleted via Settings page for owner_id=%s", self._owner_id)
         self.account_deleted.emit()
+
+    def _confirm_delete_account(self) -> bool:
+        """Show the "are you sure?" prompt with its Yes button disabled
+        for `_DELETE_CONFIRM_SECONDS` seconds (counting down in its own
+        label, then turning red once enabled) — a reflexive click must
+        not be able to confirm an irreversible action nobody has had
+        time to actually read yet. `No` is never restricted.
+        """
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Delete Account")
+        dialog.setText(
+            "This permanently deletes your account's sign-in credential, protected "
+            "file metadata, usage tracking log, and deception event history. This "
+            "cannot be undone, and you will be taken to account creation afterward.\n\n"
+            "Continue?"
+        )
+        dialog.addButton(QMessageBox.StandardButton.No)
+        yes_button = dialog.addButton(QMessageBox.StandardButton.Yes)
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+
+        timer = QTimer(dialog)
+        arm_countdown_button(yes_button, timer, _DELETE_CONFIRM_SECONDS)
+
+        dialog.exec()
+        timer.stop()
+        return dialog.clickedButton() is yes_button
 
     def _set_delete_account_status(self, message: str, error: bool, important: bool = False) -> None:
         self.delete_account_status_label.setStyleSheet(f"color: {'#e5484d' if error else '#3ecf8e'};")

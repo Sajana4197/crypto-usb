@@ -457,6 +457,59 @@ def test_delete_account_locks_after_repeated_wrong_password(controller):
     assert controller.has_account("owner-1") is True
 
 
+# -- verify_password: pre-check for a destructive action's confirmation --
+
+
+def test_verify_password_succeeds_without_side_effects_on_the_account(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    controller.verify_password("owner-1", "correct-password")  # must not raise
+
+    assert controller.has_account("owner-1") is True
+
+
+def test_verify_password_wrong_password_raises_and_does_not_delete_anything(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.verify_password("owner-1", "wrong-password")
+
+    assert controller.has_account("owner-1") is True
+
+
+def test_verify_password_wrong_password_counts_as_failed_attempt(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    with pytest.raises(InvalidCredentialsError):
+        controller.verify_password("owner-1", "wrong-password")
+
+    account = controller.get_account("owner-1")
+    assert account.failed_attempts == 1
+
+
+def test_verify_password_locks_after_repeated_wrong_password(controller):
+    controller.register_password_account("owner-1", "correct-password")
+
+    for _ in range(MAX_FAILED_ATTEMPTS):
+        with pytest.raises(InvalidCredentialsError):
+            controller.verify_password("owner-1", "wrong-password")
+
+    with pytest.raises(AccountLockedError):
+        controller.verify_password("owner-1", "correct-password")
+
+
+def test_delete_account_still_works_after_a_prior_successful_verify_password(controller):
+    """The Settings page calls `verify_password` first, then `delete_account`
+    with the same password once the user confirms -- the second call must
+    not be blocked or double-penalized by the first."""
+    controller.register_password_account("owner-1", "correct-password")
+
+    controller.verify_password("owner-1", "correct-password")
+    controller.delete_account("owner-1", "correct-password")
+
+    assert controller.has_account("owner-1") is False
+
+
 def test_delete_account_against_private_key_account_raises(controller, rsa_keypair_fixture):
     public_pem = rsa_keypair.serialize_public_key(rsa_keypair_fixture.public_key)
     controller.register_private_key_account("owner-1", public_pem)

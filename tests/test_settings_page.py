@@ -4,13 +4,14 @@ import sqlite3
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 from crypto import rsa_keypair
 from security.account_repository import AccountRepository
 from security.auth_controller import AuthController
 from security.lockout_policy import MAX_FAILED_ATTEMPTS
-from ui.pages.settings_page import SettingsPage
+from ui.pages.settings_page import SettingsPage, arm_countdown_button
 
 
 def _app():
@@ -30,12 +31,14 @@ def mock_result_popup(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def mock_confirm_dialog(monkeypatch):
-    """Delete-account asks for a native confirmation via
-    `QMessageBox.warning` -- autouse a default "Yes" so tests don't block
-    on a real modal; tests that specifically want to simulate cancelling
-    take this fixture as a parameter and override its return value."""
-    mock = MagicMock(return_value=QMessageBox.StandardButton.Yes)
-    monkeypatch.setattr("ui.pages.settings_page.QMessageBox.warning", mock)
+    """Delete-account asks for a confirmation via a real, blocking modal
+    with a countdown-gated Yes button (`SettingsPage._confirm_delete_account`)
+    -- autouse a default "confirmed" so tests don't block on it or wait
+    out the real countdown; tests that specifically want to simulate
+    cancelling take this fixture as a parameter and override its return
+    value."""
+    mock = MagicMock(return_value=True)
+    monkeypatch.setattr("ui.pages.settings_page.SettingsPage._confirm_delete_account", mock)
     return mock
 
 
@@ -264,7 +267,7 @@ def test_delete_account_asks_for_confirmation(controller, mock_confirm_dialog):
 
 def test_delete_account_cancelled_confirmation_does_not_delete(controller, mock_confirm_dialog):
     _app()
-    mock_confirm_dialog.return_value = QMessageBox.StandardButton.No
+    mock_confirm_dialog.return_value = False
     controller.register_password_account("owner-1", "correct-password")
     page = SettingsPage(auth_controller=controller, owner_id="owner-1")
     emitted = MagicMock()
@@ -290,7 +293,9 @@ def test_delete_account_empty_password_does_not_prompt_confirmation(controller, 
     assert controller.has_account("owner-1") is True
 
 
-def test_delete_account_wrong_password_shows_error_and_does_not_delete(controller, mock_result_popup):
+def test_delete_account_wrong_password_shows_error_and_does_not_delete(
+    controller, mock_result_popup, mock_confirm_dialog
+):
     _app()
     controller.register_password_account("owner-1", "correct-password")
     page = SettingsPage(auth_controller=controller, owner_id="owner-1")
@@ -306,9 +311,12 @@ def test_delete_account_wrong_password_shows_error_and_does_not_delete(controlle
     mock_result_popup.assert_called_once()
     _, kwargs = mock_result_popup.call_args
     assert kwargs["ok"] is False
+    # The password is checked *before* asking "are you sure?" -- a wrong
+    # password must never reach the confirmation prompt at all.
+    mock_confirm_dialog.assert_not_called()
 
 
-def test_delete_account_locks_after_repeated_wrong_password(controller):
+def test_delete_account_locks_after_repeated_wrong_password(controller, mock_confirm_dialog):
     _app()
     controller.register_password_account("owner-1", "correct-password")
 
@@ -323,3 +331,64 @@ def test_delete_account_locks_after_repeated_wrong_password(controller):
 
     assert "locked" in page.delete_account_status_label.text().lower()
     assert controller.has_account("owner-1") is True
+    mock_confirm_dialog.assert_not_called()
+
+
+# -- arm_countdown_button: the delete-confirmation Yes button's countdown --
+# Driven directly against a bare QPushButton/QTimer via `timer.timeout.emit()`
+# -- never through a real, blocking QMessageBox -- so these run instantly
+# regardless of the real 1-second timer interval.
+
+
+def test_countdown_button_starts_disabled_with_seconds_in_its_label():
+    _app()
+    button = QPushButton()
+    timer = QTimer()
+
+    arm_countdown_button(button, timer, 10)
+
+    assert button.isEnabled() is False
+    assert button.text() == "Yes (10)"
+
+
+def test_countdown_button_ticks_down_each_second():
+    _app()
+    button = QPushButton()
+    timer = QTimer()
+
+    arm_countdown_button(button, timer, 3)
+    timer.timeout.emit()
+
+    assert button.isEnabled() is False
+    assert button.text() == "Yes (2)"
+
+
+def test_countdown_button_enables_and_turns_red_when_it_reaches_zero():
+    _app()
+    button = QPushButton()
+    timer = QTimer()
+
+    arm_countdown_button(button, timer, 2)
+    timer.timeout.emit()
+    timer.timeout.emit()
+
+    assert button.isEnabled() is True
+    assert button.text() == "Yes"
+    assert "#e5484d" in button.styleSheet()
+
+
+def test_countdown_button_stays_enabled_if_ticked_again_after_reaching_zero():
+    _app()
+    button = QPushButton()
+    timer = QTimer()
+
+    arm_countdown_button(button, timer, 1)
+    timer.timeout.emit()
+    assert timer.isActive() is False
+
+    # A defensive extra tick (there shouldn't be one, since the timer is
+    # stopped, but nothing should break if Qt ever delivers one anyway).
+    timer.timeout.emit()
+
+    assert button.isEnabled() is True
+    assert button.text() == "Yes"

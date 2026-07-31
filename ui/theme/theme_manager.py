@@ -177,6 +177,12 @@ QLabel#bindingHeading {
     color: #00e5ff;
     font-weight: 600;
 }
+QFrame#dangerZonePanel {
+    background-color: rgba(229, 72, 77, 0.10);
+    border: 1px solid rgba(229, 72, 77, 0.45);
+    border-radius: 4px;
+    margin-top: 6px;
+}
 QLabel#summaryLabel {
     color: #8fa8b5;
     font-weight: 600;
@@ -419,6 +425,12 @@ QFrame#bindingPanel {
 QLabel#bindingHeading {
     color: #0891b2;
     font-weight: 600;
+}
+QFrame#dangerZonePanel {
+    background-color: rgba(229, 72, 77, 0.08);
+    border: 1px solid rgba(229, 72, 77, 0.35);
+    border-radius: 4px;
+    margin-top: 6px;
 }
 QFrame#detailsPanel {
     background-color: #ffffff;

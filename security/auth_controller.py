@@ -237,10 +237,36 @@ class AuthController:
         self._fail(account, "current password")
         raise InvalidCredentialsError("Incorrect current password")
 
+    def verify_password(self, owner_id: str, current_password: str) -> None:
+        """Verify `current_password` against the stored account with no
+        other side effect — no state is changed except the same lockout
+        accounting a real sign-in would apply (a wrong password here
+        counts toward lockout exactly like anywhere else; a right one
+        resets the counter). Raises `AccountNotFoundError`,
+        `AccountLockedError`, or `InvalidCredentialsError`.
+
+        Exists so a caller about to perform a re-authenticated,
+        destructive action (see `delete_account`) can confirm the
+        password is actually correct *before* asking "are you sure?" —
+        a wrong password should never reach a confirmation prompt for an
+        action it was never going to be allowed to perform.
+        """
+        account = self._require_unlocked_account(owner_id, AuthMethod.PASSWORD)
+
+        assert isinstance(account.credential, PasswordCredential)
+        if password_hasher.verify_password(current_password, account.credential):
+            self._lockout_policy.register_success(account)
+            self._repository.save(account)
+            return
+
+        self._fail(account, "current password")
+        raise InvalidCredentialsError("Incorrect current password")
+
     def delete_account(self, owner_id: str, current_password: str) -> None:
-        """Verify `current_password`, then permanently delete the local
-        account and reset this installation's protected data. Subject to
-        the same lockout policy as a normal password sign-in. Raises
+        """Verify `current_password` (see `verify_password`), then
+        permanently delete the local account and reset this
+        installation's protected data. Subject to the same lockout
+        policy as a normal password sign-in. Raises
         `AccountNotFoundError`, `AccountLockedError`, or
         `InvalidCredentialsError` (wrong current password) — like
         `change_password`, this re-confirms an already authenticated
@@ -268,21 +294,15 @@ class AuthController:
         accepted here because account deletion is a full, user-initiated
         reset, not a way to selectively edit history.
         """
-        account = self._require_unlocked_account(owner_id, AuthMethod.PASSWORD)
+        self.verify_password(owner_id, current_password)
 
-        assert isinstance(account.credential, PasswordCredential)
-        if password_hasher.verify_password(current_password, account.credential):
-            if self._db_manager is not None:
-                conn = self._db_manager.connect()
-                MetadataRepository(conn).delete_all()
-                TrackingRepository(conn).clear()
-                DeceptionEventRepository(conn).clear()
-            self._repository.delete(owner_id)
-            logger.warning("Deleted account for owner_id=%s and reset local protected data", owner_id)
-            return
-
-        self._fail(account, "current password")
-        raise InvalidCredentialsError("Incorrect current password")
+        if self._db_manager is not None:
+            conn = self._db_manager.connect()
+            MetadataRepository(conn).delete_all()
+            TrackingRepository(conn).clear()
+            DeceptionEventRepository(conn).clear()
+        self._repository.delete(owner_id)
+        logger.warning("Deleted account for owner_id=%s and reset local protected data", owner_id)
 
     def reset_password_with_recovery_code(
         self, owner_id: str, recovery_code: str, new_password: str
